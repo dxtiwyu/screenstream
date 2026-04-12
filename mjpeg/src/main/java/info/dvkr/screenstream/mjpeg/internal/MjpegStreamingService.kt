@@ -455,11 +455,9 @@ internal class MjpegStreamingService(
                             service.registerComponentCallbacks(componentCallback)
                         }
 
-                        @Suppress("DEPRECATION")
                         @SuppressLint("WakelockTimeout")
-                        if (Build.MANUFACTURER !in listOf("OnePlus", "OPPO") && mjpegSettings.data.value.keepAwake) {
-                            val flags = PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP
-                            wakeLock = powerManager.newWakeLock(flags, "ScreenStream::MJPEG-Tag").apply { acquire() }
+                        run {
+                            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenStream::MJPEG-Tag").apply { acquire() }
                         }
 
                         this@MjpegStreamingService.isStreaming = true
@@ -553,8 +551,10 @@ internal class MjpegStreamingService(
                 if (wasStreaming && mjpegSettings.data.value.htmlShowPressStart) bitmapStateFlow.value = getStartBitmap()
             }
 
-            is InternalEvent.ScreenOff -> if (isStreaming && mjpegSettings.data.value.stopOnSleep)
-                sendEvent(MjpegEvent.Intentable.StopStream("ScreenOff"))
+            is InternalEvent.ScreenOff -> {
+                // Never stop streaming on screen off
+                XLog.d(getLog("processEvent", "ScreenOff ignored - persistent streaming mode"))
+            }
 
             is InternalEvent.ConfigurationChange -> {
                 val newConfig = Configuration(event.newConfig)
@@ -590,7 +590,7 @@ internal class MjpegStreamingService(
             }
 
             is InternalEvent.RestartServer -> {
-                if (mjpegSettings.data.value.stopOnConfigurationChange) stopStream("ConfigurationChange")
+                // Never stop streaming on configuration change - persistent mode
 
                 waitingForPermission = false
                 if (pendingServer) {
@@ -598,15 +598,11 @@ internal class MjpegStreamingService(
                     if (currentError is MjpegError.AddressNotFoundException) currentError = null
                 } else {
                     httpServer.stop(event.reason is RestartReason.SettingsChanged)
-                    if (mjpegSettings.data.value.stopOnConfigurationChange) {
-                        sendEvent(InternalEvent.InitState(false))
-                    } else {
-                        pendingServer = true
-                        netInterfaces = emptyList()
-                        clients = emptyList()
-                        slowClients = emptyList()
-                        currentError = null
-                    }
+                    pendingServer = true
+                    netInterfaces = emptyList()
+                    clients = emptyList()
+                    slowClients = emptyList()
+                    currentError = null
                 }
                 sendEvent(InternalEvent.DiscoverAddress("RestartServer", 0))
             }

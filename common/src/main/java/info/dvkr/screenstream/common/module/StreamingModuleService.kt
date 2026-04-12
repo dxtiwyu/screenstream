@@ -40,6 +40,12 @@ public abstract class StreamingModuleService : Service() {
         super.onDestroy()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Keep service alive when app is swiped from recents
+        XLog.d(getLog("onTaskRemoved", "Task removed, service continues"))
+        super.onTaskRemoved(rootIntent)
+    }
+
     protected fun isDuplicateIntent(intent: Intent): Boolean {
         val id = intent.getStringExtra(INTENT_ID)
         return when {

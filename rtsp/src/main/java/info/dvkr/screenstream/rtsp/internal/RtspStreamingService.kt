@@ -586,7 +586,7 @@ internal class RtspStreamingService(
 
         service.startListening(
             supervisorJob,
-            onScreenOff = { if (rtspSettings.data.value.stopOnSleep) sendEvent(RtspEvent.Intentable.StopStream("ScreenOff")) },
+            onScreenOff = { /* Never stop streaming on screen off - persistent mode */ },
             onConnectionChanged = {
                 if (rtspSettings.data.value.mode == RtspSettings.Values.Mode.SERVER)
                     sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "ConnectionChanged"), timeout = 150)
@@ -1286,10 +1286,7 @@ internal class RtspStreamingService(
                     return
                 }
 
-                if (rtspSettings.data.value.stopOnConfigurationChange) { //TODO Not yet exposed in UI
-                    sendEvent(RtspEvent.Intentable.StopStream("ConfigurationChange"))
-                    return
-                }
+                // Never stop streaming on configuration change - persistent mode
 
                 val newConfig = Configuration(event.newConfig)
                 val configDiff = projection.deviceConfiguration.diff(newConfig)

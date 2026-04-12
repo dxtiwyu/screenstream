@@ -45,7 +45,7 @@ public class RtspModuleService : StreamingModuleService() {
                 IllegalArgumentException("RtspModuleService.onStartCommand: intent = null. Stop self, startId: $startId")
             )
             stopSelfResult(startId)
-            return START_NOT_STICKY
+            return START_STICKY
         }
         XLog.d(getLog("onStartCommand", "RtspModuleService.INTENT_ID: ${intent.getStringExtra(INTENT_ID)}"))
 
@@ -54,14 +54,14 @@ public class RtspModuleService : StreamingModuleService() {
                 getLog("onStartCommand"),
                 IllegalArgumentException("RtspModuleService.onStartCommand: RtspEvent = null, startId: $startId")
             )
-            return START_NOT_STICKY
+            return START_STICKY
         }
         XLog.d(getLog("onStartCommand", "RtspEvent: $rtspEvent, startId: $startId"))
 
         val shouldDedupe = rtspEvent is RtspEvent.Intentable.StartService
         if (shouldDedupe && isDuplicateIntent(intent)) {
             XLog.i(getLog("onStartCommand", "Duplicate intent for $rtspEvent. Ignoring. startId: $startId"))
-            return START_NOT_STICKY
+            return START_STICKY
         }
 
         if ((flags and START_FLAG_REDELIVERY) != 0) {
@@ -69,7 +69,7 @@ public class RtspModuleService : StreamingModuleService() {
                 getLog("onStartCommand"),
                 IllegalArgumentException("RtspModuleService.onStartCommand: redelivered intent, RtspEvent: $rtspEvent, startId: $startId, $intent")
             )
-            return START_NOT_STICKY
+            return START_STICKY
         }
 
         if (streamingModuleManager.isActive(RtspStreamingModule.Id)) {
@@ -87,7 +87,7 @@ public class RtspModuleService : StreamingModuleService() {
             stopSelf(startId)
         }
 
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {

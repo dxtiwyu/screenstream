@@ -1,9 +1,14 @@
 package info.dvkr.screenstream
 
+import android.annotation.SuppressLint
 import android.app.Application
+import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.os.StrictMode
+import android.provider.Settings
 import com.elvishew.xlog.LogConfiguration
 import com.jakewharton.processphoenix.ProcessPhoenix
 import info.dvkr.screenstream.common.analytics.StreamingAnalytics
@@ -70,5 +75,24 @@ public abstract class BaseApp : Application() {
             androidContext(this@BaseApp)
             modules(defaultModule, *streamingModules)
         }
+
+        requestBatteryOptimizationExemption()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        val powerManager = getSystemService(PowerManager::class.java)
+        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                startActivity(intent)
+            } catch (_: Exception) {
+                // Some devices don't support this intent
+            }
+        }
     }
 }
+

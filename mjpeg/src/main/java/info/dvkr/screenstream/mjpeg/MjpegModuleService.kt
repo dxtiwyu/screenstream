@@ -42,25 +42,25 @@ public class MjpegModuleService : StreamingModuleService() {
         if (intent == null) {
             XLog.e(getLog("onStartCommand"), IllegalArgumentException("MjpegModuleService.onStartCommand: intent = null. Stop self, startId: $startId"))
             stopSelfResult(startId)
-            return START_NOT_STICKY
+            return START_STICKY
         }
         XLog.d(getLog("onStartCommand", "MjpegModuleService.INTENT_ID: ${intent.getStringExtra(INTENT_ID)}"))
 
         val mjpegEvent = MjpegEvent.Intentable.fromIntent(intent) ?: run {
             XLog.e(getLog("onStartCommand"), IllegalArgumentException("MjpegModuleService.onStartCommand: MjpegEvent = null, startId: $startId"))
-            return START_NOT_STICKY
+            return START_STICKY
         }
         XLog.d(getLog("onStartCommand", "MjpegEvent: $mjpegEvent, startId: $startId"))
 
         val shouldDedupe = mjpegEvent is MjpegEvent.Intentable.StartService
         if (shouldDedupe && isDuplicateIntent(intent)) {
             XLog.i(getLog("onStartCommand", "Duplicate intent for $mjpegEvent. Ignoring. startId: $startId"))
-            return START_NOT_STICKY
+            return START_STICKY
         }
 
         if ((flags and START_FLAG_REDELIVERY) != 0) {
             XLog.e(getLog("onStartCommand"), IllegalArgumentException("MjpegModuleService.onStartCommand: redelivered intent, MjpegEvent: $mjpegEvent, startId: $startId, $intent"))
-            return START_NOT_STICKY
+            return START_STICKY
         }
 
         if (streamingModuleManager.isActive(MjpegStreamingModule.Id)) {
@@ -78,7 +78,7 @@ public class MjpegModuleService : StreamingModuleService() {
             stopSelf(startId)
         }
 
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
