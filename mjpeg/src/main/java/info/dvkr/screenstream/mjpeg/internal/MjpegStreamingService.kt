@@ -86,8 +86,13 @@ internal class MjpegStreamingService(
             callbackHandler = mainHandler,
             startForeground = { fgsType -> service.startForeground(fgsType) },
             onProjectionStopped = { generation ->
-                XLog.i(getLog("ProjectionCoordinator.onStop", "g=$generation, streaming=$isStreaming"))
+                XLog.i(getLog("ProjectionCoordinator.onStop", "g=$generation, streaming=$isStreaming, cachedIntent=${mediaProjectionIntent != null}"))
+                // Auto-restart: stop and then queue restart with cached intent
                 sendEvent(MjpegEvent.Intentable.StopStream("ProjectionCoordinator.onStop[generation=$generation]"))
+                if (mediaProjectionIntent != null) {
+                    XLog.i(getLog("ProjectionCoordinator.onStop", "Scheduling auto-restart with cached intent"))
+                    sendEvent(InternalEvent.AutoRestartStream("ProjectionDied"), 2000)
+                }
             }
         )
     }
@@ -148,6 +153,7 @@ internal class MjpegStreamingService(
         data class Clients(val clients: List<MjpegState.Client>) : InternalEvent(Priority.RESTART_IGNORE)
         data class RestartServer(val reason: RestartReason) : InternalEvent(Priority.RESTART_IGNORE)
         data object UpdateStartBitmap : InternalEvent(Priority.RESTART_IGNORE)
+        data class AutoRestartStream(val reason: String) : InternalEvent(Priority.RESTART_IGNORE)
 
         data class Error(val error: MjpegError) : InternalEvent(Priority.RECOVER_IGNORE)
 
@@ -549,6 +555,16 @@ internal class MjpegStreamingService(
                     mjpegSettings.updateData { copy(pin = randomPin()) }
 
                 if (wasStreaming && mjpegSettings.data.value.htmlShowPressStart) bitmapStateFlow.value = getStartBitmap()
+            }
+
+            is InternalEvent.AutoRestartStream -> {
+                XLog.i(getLog("AutoRestartStream", "reason=${event.reason}, cachedIntent=${mediaProjectionIntent != null}, streaming=$isStreaming, pendingServer=$pendingServer"))
+                if (!isStreaming && !destroyPending && mediaProjectionIntent != null && !pendingServer) {
+                    XLog.i(getLog("AutoRestartStream", "Restarting stream with cached intent"))
+                    MjpegModuleService.startProjection(service, mediaProjectionIntent!!, "auto_restart")
+                } else {
+                    XLog.d(getLog("AutoRestartStream", "Cannot auto-restart: streaming=$isStreaming, destroyPending=$destroyPending, cachedIntent=${mediaProjectionIntent != null}"))
+                }
             }
 
             is InternalEvent.ScreenOff -> {

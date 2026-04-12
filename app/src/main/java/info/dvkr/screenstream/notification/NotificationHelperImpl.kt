@@ -37,15 +37,17 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
             notificationManager.deleteNotificationChannel("info.dvkr.screenstream.NOTIFICATION_CHANNEL_START_STOP")
 
             val streamingName = context.getString(R.string.app_notification_channel_streaming)
-            NotificationChannel(CHANNEL_STREAMING, streamingName, NotificationManager.IMPORTANCE_DEFAULT).apply {
+            NotificationChannel(CHANNEL_STREAMING, streamingName, NotificationManager.IMPORTANCE_MIN).apply {
                 setSound(null, null)
                 enableLights(false)
                 enableVibration(false)
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
+                description = ""
             }.let { notificationManager.createNotificationChannel(it) }
 
             val errorName = context.getString(R.string.app_notification_channel_error)
-            NotificationChannel(CHANNEL_ERROR, errorName, NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(CHANNEL_ERROR, errorName, NotificationManager.IMPORTANCE_LOW).apply {
                 setSound(null, null)
                 enableLights(false)
                 enableVibration(false)
@@ -87,32 +89,14 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
         XLog.d(getLog("createForegroundNotification", "context: ${context::class.java.simpleName}#${context.hashCode()}"))
 
         return NotificationCompat.Builder(context, CHANNEL_STREAMING)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setLargeIcon(largeIcon)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
-            .setContentTitle(context.getString(R.string.app_notification_streaming_title))
-            .setContentText(context.getString(R.string.app_notification_streaming_content))
-            .setSmallIcon(R.drawable.ic_notification_small_anim_24dp)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setContentIntent(PendingIntent.getActivity(context, 0, SingleActivity.getIntent(context), PendingIntent.FLAG_IMMUTABLE))
-            .addAction(
-                NotificationCompat.Action(
-                    null,
-                    context.getString(R.string.app_notification_stop),
-                    PendingIntent.getService(context, 2, stopIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                )
-            )
-            .also { builder ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    notificationManager.getNotificationChannel(CHANNEL_STREAMING)?.let { notificationChannel ->
-                        builder.setSound(notificationChannel.sound)
-                            .setPriority(notificationChannel.importance)
-                            .setVibrate(notificationChannel.vibrationPattern)
-                    }
-                }
-            }.build()
+            .setSmallIcon(R.drawable.ic_notification_small_24dp)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setSilent(true)
+            .build()
     }
 
     override fun getErrorNotification(context: Context, message: String, recoverIntent: Intent): Notification {
