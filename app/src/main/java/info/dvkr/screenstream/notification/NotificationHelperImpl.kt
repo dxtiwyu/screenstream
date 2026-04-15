@@ -88,15 +88,22 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
     override fun createForegroundNotification(context: Context, stopIntent: Intent): Notification {
         XLog.d(getLog("createForegroundNotification", "context: ${context::class.java.simpleName}#${context.hashCode()}"))
 
-        return NotificationCompat.Builder(context, CHANNEL_STREAMING)
+        val builder = NotificationCompat.Builder(context, CHANNEL_STREAMING)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
             .setSmallIcon(R.drawable.ic_notification_small_24dp)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setContentTitle(context.getString(R.string.app_notification_streaming_title))
+            .setContentText(context.getString(R.string.app_notification_streaming_content))
             .setSilent(true)
-            .build()
+        
+        // FOREGROUND_SERVICE_DEFERRED is only available on Android 12+ (API 31)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+        }
+        
+        return builder.build()
     }
 
     override fun getErrorNotification(context: Context, message: String, recoverIntent: Intent): Notification {
