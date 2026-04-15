@@ -661,10 +661,12 @@ internal class RtspClient(
                     when (queuedItem) {
                         is QueuedItem.Frame -> {
                             if (queuedItem.frame is MediaFrame.VideoFrame && queuedItem.videoGeneration != activeVideoGeneration) {
+                                queuedItem.frame.release()
                                 continue
                             }
                             // If queue is congested, drop non-key video frames to reduce latency
                             if (queuedItem.frame is MediaFrame.VideoFrame && mediaFramesBuffer.hasCongestion(75f) && queuedItem.frame.info.isKeyFrame.not()) {
+                                queuedItem.frame.release()
                                 continue
                             }
                             val rtpFrames = when (val mediaFrame = queuedItem.frame) {
