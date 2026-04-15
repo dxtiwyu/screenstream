@@ -3,7 +3,9 @@ package info.dvkr.screenstream.common.module
 import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.ServiceCompat
 import com.elvishew.xlog.XLog
 import info.dvkr.screenstream.common.getLog
@@ -20,6 +22,7 @@ public abstract class StreamingModuleService : Service() {
     protected val notificationHelper: NotificationHelper by inject(mode = LazyThreadSafetyMode.NONE)
 
     protected val processedIntents: MutableSet<String> = mutableSetOf()
+    private var wakeLock: PowerManager.WakeLock? = null
 
     protected companion object {
         public const val INTENT_ID: String = "info.dvkr.screenstream.intent.ID"
@@ -32,17 +35,67 @@ public abstract class StreamingModuleService : Service() {
     override fun onCreate() {
         super.onCreate()
         XLog.d(getLog("onCreate"))
+        acquireWakeLock()
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenStream::ServiceWake").apply {
+                acquire()
+            }
+            XLog.d(getLog("acquireWakeLock", "WakeLock acquired"))
+        } catch (e: Exception) {
+            XLog.e(getLog("acquireWakeLock", "Failed: ${e.message}"))
+        }
     }
 
     override fun onDestroy() {
         stopForeground()
         hideErrorNotification()
+        releaseWakeLock()
         super.onDestroy()
+
+        // Self-restart for persistence across SystemUI restarts and kills
+        XLog.d(getLog("onDestroy", "Scheduling self-restart"))
+        try {
+            val restartIntent = Intent(this, this::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restartIntent)
+            } else {
+                startService(restartIntent)
+            }
+        } catch (e: Exception) {
+            XLog.e(getLog("onDestroy", "Self-restart failed: ${e.message}"))
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                XLog.d(getLog("releaseWakeLock", "WakeLock released"))
+            }
+        } catch (e: Exception) {
+            XLog.e(getLog("releaseWakeLock", "Failed: ${e.message}"))
+        }
+        wakeLock = null
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Keep service alive when app is swiped from recents
-        XLog.d(getLog("onTaskRemoved", "Task removed, service continues"))
+        // Restart service when app is swiped from recents
+        XLog.d(getLog("onTaskRemoved", "Task removed, scheduling restart"))
+        try {
+            val restartIntent = Intent(this, this::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restartIntent)
+            } else {
+                startService(restartIntent)
+            }
+        } catch (e: Exception) {
+            XLog.e(getLog("onTaskRemoved", "Restart failed: ${e.message}"))
+        }
         super.onTaskRemoved(rootIntent)
     }
 

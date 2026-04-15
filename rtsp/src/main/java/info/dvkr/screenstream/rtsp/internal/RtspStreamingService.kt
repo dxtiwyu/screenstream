@@ -97,6 +97,15 @@ internal class RtspStreamingService(
             onProjectionStopped = { generation ->
                 XLog.i(getLog("ProjectionCoordinator.onStop", "g=$generation, mode=${rtspSettings.data.value.mode}, active=${projectionState.active != null}"))
                 sendEvent(RtspEvent.Intentable.StopStream("ProjectionCoordinator.onStop[generation=$generation]"))
+
+                // Auto-restart stream after projection loss (e.g. SystemUI restart)
+                coroutineScope.launch {
+                    delay(3000) // Wait for system to stabilize
+                    if (projectionState.active == null && !projectionState.waitingForPermission && !destroyPending) {
+                        XLog.i(getLog("ProjectionCoordinator.onStop", "Auto-restarting stream after projection loss"))
+                        sendEvent(RtspStreamingService.InternalEvent.StartStream(permissionEducationShown = true))
+                    }
+                }
             }
         )
     }
@@ -642,6 +651,15 @@ internal class RtspStreamingService(
             sendEvent(InternalEvent.InitState(clearIntent = true, mode = mode))
             if (mode == RtspSettings.Values.Mode.SERVER) {
                 sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "InitStateFallback"))
+            }
+        }
+
+        // Auto-start streaming after initialization completes
+        coroutineScope.launch {
+            delay(2000) // Wait for init, codec selection, and server discovery to complete
+            if (projectionState.active == null && !projectionState.waitingForPermission) {
+                XLog.i(getLog("start", "Auto-starting stream after init"))
+                sendEvent(InternalEvent.StartStream(permissionEducationShown = true))
             }
         }
     }
