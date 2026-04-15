@@ -321,13 +321,21 @@ internal class RtspStreamingService(
                         XLog.d(getLog("DiscoverAddress", "${netInterfaces.size} interfaces discovered (${event.reason})"))
 
                         if (netInterfaces.isEmpty()) {
-                            if (event.attempt < 4) {
-                                sendEvent(
-                                    InternalEvent.RtspServer.DiscoverAddress(reason = event.reason, attempt = event.attempt + 1),
-                                    1000
-                                )
-                            } else {
-                                XLog.w(getLog("RtspServer", "No interfaces to bind. Stopping stream and give up."))
+                            // Keep retrying with exponential backoff instead of giving up
+                            // First 4 attempts: 1s delay, then increase to 3s, then 5s max
+                            val delay = when {
+                                event.attempt < 4 -> 1000L
+                                event.attempt < 8 -> 3000L
+                                else -> 5000L
+                            }
+                            sendEvent(
+                                InternalEvent.RtspServer.DiscoverAddress(reason = event.reason, attempt = event.attempt + 1),
+                                delay
+                            )
+                            
+                            // Show error only on first failure, but keep retrying in background
+                            if (event.attempt == 4 && currentError == null) {
+                                XLog.w(getLog("RtspServer", "No interfaces to bind after ${event.attempt} attempts. Will keep retrying..."))
                                 stopStream(true)
                                 currentError = RtspError.ServerError.AddressNotFoundException()
                             }

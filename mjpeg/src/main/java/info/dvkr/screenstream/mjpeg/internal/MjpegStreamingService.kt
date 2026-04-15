@@ -364,9 +364,17 @@ internal class MjpegStreamingService(
                 if (newInterfaces.isNotEmpty()) {
                     sendEvent(InternalEvent.StartServer(newInterfaces))
                 } else {
-                    if (event.attempt < 3) {
-                        sendEvent(InternalEvent.DiscoverAddress(event.reason, event.attempt + 1), 1000)
-                    } else {
+                    // Keep retrying with exponential backoff instead of giving up
+                    // First 3 attempts: 1s delay, then increase to 3s, then 5s max
+                    val delay = when {
+                        event.attempt < 3 -> 1000L
+                        event.attempt < 6 -> 3000L
+                        else -> 5000L
+                    }
+                    sendEvent(InternalEvent.DiscoverAddress(event.reason, event.attempt + 1), delay)
+                    
+                    // Show error only on first failure, but keep retrying in background
+                    if (event.attempt == 3 && currentError == null) {
                         netInterfaces = emptyList()
                         clients = emptyList()
                         slowClients = emptyList()
