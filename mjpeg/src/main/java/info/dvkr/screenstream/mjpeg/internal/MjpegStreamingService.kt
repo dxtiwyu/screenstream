@@ -137,6 +137,8 @@ internal class MjpegStreamingService(
     private var bitmapCapture: BitmapCapture? = null
     private var currentError: MjpegError? = null
     private var previousError: MjpegError? = null
+    /** True only when the user explicitly pressed Stop (button/notification). Prevents auto-restart. */
+    private var userRequestedStop: Boolean = false
     // All vars must be read/write on this (WebRTC-HT) thread
 
     internal sealed class InternalEvent(priority: Int) : MjpegEvent(priority) {
@@ -349,6 +351,7 @@ internal class MjpegStreamingService(
                 bitmapCapture = null
 
                 currentError = null
+                // Don't reset userRequestedStop here — it must survive RecoverError cycles
             }
 
             is InternalEvent.DiscoverAddress -> {
@@ -397,10 +400,16 @@ internal class MjpegStreamingService(
                 netInterfaces = event.interfaces
                 pendingServer = false
 
-                // Auto-restart stream if we had a cached projection intent (WiFi came back)
-                if (!isStreaming && !destroyPending && mediaProjectionIntent != null) {
-                    XLog.i(getLog("StartServer", "Network restored – auto-restarting stream with cached intent"))
-                    sendEvent(InternalEvent.AutoRestartStream("NetworkRestored"), 500)
+                // Always-stream: trigger stream start/resume whenever server is ready
+                if (!isStreaming && !destroyPending && !userRequestedStop && !waitingForPermission) {
+                    if (mediaProjectionIntent != null) {
+                        XLog.i(getLog("StartServer", "Server ready – auto-restarting stream with cached intent"))
+                        sendEvent(InternalEvent.AutoRestartStream("ServerReady"), 500)
+                    } else {
+                        // First run or intent expired: show permission dialog automatically
+                        XLog.i(getLog("StartServer", "Server ready – requesting cast permission automatically"))
+                        sendEvent(InternalEvent.StartStream(permissionEducationShown = false), 500)
+                    }
                 }
             }
 
@@ -568,21 +577,46 @@ internal class MjpegStreamingService(
             }
 
             is MjpegEvent.Intentable.StopStream -> {
+                // Detect if this is a user-intentional stop vs a system stop
+                val isUserStop = event.reason.contains("User action", ignoreCase = true) ||
+                    event.reason.contains("StartStopFromWebPage", ignoreCase = true)
+                userRequestedStop = isUserStop
+
                 val wasStreaming = stopStream(event.reason)
 
                 if (wasStreaming && mjpegSettings.data.value.enablePin && mjpegSettings.data.value.autoChangePin)
                     mjpegSettings.updateData { copy(pin = randomPin()) }
 
                 if (wasStreaming && mjpegSettings.data.value.htmlShowPressStart) bitmapStateFlow.value = getStartBitmap()
+
+                // Always-stream: if system stopped us (not user), schedule auto-restart
+                if (wasStreaming && !isUserStop && !destroyPending && !pendingServer) {
+                    XLog.i(getLog("StopStream", "System stop (${event.reason}) – scheduling auto-restart in 3s"))
+                    sendEvent(InternalEvent.AutoRestartStream("SystemStop:${event.reason}"), 3000)
+                }
             }
 
             is InternalEvent.AutoRestartStream -> {
-                XLog.i(getLog("AutoRestartStream", "reason=${event.reason}, cachedIntent=${mediaProjectionIntent != null}, streaming=$isStreaming, pendingServer=$pendingServer"))
-                if (!isStreaming && !destroyPending && mediaProjectionIntent != null && !pendingServer) {
-                    XLog.i(getLog("AutoRestartStream", "Restarting stream with cached intent"))
-                    MjpegModuleService.startProjection(service, mediaProjectionIntent!!, "auto_restart")
+                XLog.i(getLog("AutoRestartStream", "reason=${event.reason}, userStop=$userRequestedStop, cachedIntent=${mediaProjectionIntent != null}, streaming=$isStreaming, pendingServer=$pendingServer"))
+                if (userRequestedStop) {
+                    XLog.i(getLog("AutoRestartStream", "User requested stop – not auto-restarting"))
+                    return
+                }
+                if (!isStreaming && !destroyPending && !pendingServer && !waitingForPermission) {
+                    if (mediaProjectionIntent != null) {
+                        XLog.i(getLog("AutoRestartStream", "Restarting stream with cached intent"))
+                        MjpegModuleService.startProjection(service, mediaProjectionIntent!!, "auto_restart")
+                    } else {
+                        // No cached intent (e.g. Android 14+): show permission dialog again
+                        XLog.i(getLog("AutoRestartStream", "No cached intent – requesting permission again"))
+                        sendEvent(InternalEvent.StartStream(permissionEducationShown = false))
+                    }
                 } else {
-                    XLog.d(getLog("AutoRestartStream", "Cannot auto-restart: streaming=$isStreaming, destroyPending=$destroyPending, cachedIntent=${mediaProjectionIntent != null}"))
+                    XLog.d(getLog("AutoRestartStream", "Cannot auto-restart: streaming=$isStreaming, destroyPending=$destroyPending, pendingServer=$pendingServer, waitingForPermission=$waitingForPermission"))
+                    if (!isStreaming && !destroyPending && !pendingServer) {
+                        // Retry after server is ready
+                        sendEvent(InternalEvent.AutoRestartStream(event.reason), 2000)
+                    }
                 }
             }
 

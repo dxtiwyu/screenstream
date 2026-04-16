@@ -225,6 +225,8 @@ internal class RtspStreamingService(
     private var resizeActor: ResizeConflateActor? = null
     private var settingsLoaded: Boolean = false
     private var initializedMode: RtspSettings.Values.Mode? = null
+    /** True only when the user explicitly pressed Stop (button/notification). Prevents auto-restart. */
+    private var userRequestedStop: Boolean = false
     // All vars must be read/write on this (RTSP_HT) thread
 
     private inner class ResizeConflateActor(
@@ -669,10 +671,10 @@ internal class RtspStreamingService(
             }
         }
 
-        // Auto-start streaming after initialization completes
+        // Always-stream: auto-start streaming after initialization completes
         coroutineScope.launch {
             delay(2000) // Wait for init, codec selection, and server discovery to complete
-            if (projectionState.active == null && !projectionState.waitingForPermission) {
+            if (projectionState.active == null && !projectionState.waitingForPermission && !userRequestedStop) {
                 XLog.i(getLog("start", "Auto-starting stream after init"))
                 sendEvent(InternalEvent.StartStream(permissionEducationShown = true))
             }
@@ -1351,7 +1353,24 @@ internal class RtspStreamingService(
                 resizeActor?.offer(sourceWidth = event.width, sourceHeight = event.height)
             }
 
-            is RtspEvent.Intentable.StopStream -> stopStream(stopServer = false, stopReason = event.reason)
+            is RtspEvent.Intentable.StopStream -> {
+                val isUserStop = event.reason.contains("User action", ignoreCase = true)
+                userRequestedStop = isUserStop
+                val wasStreaming = projectionState.active != null
+                stopStream(stopServer = false, stopReason = event.reason)
+
+                // Always-stream: schedule auto-restart for system-initiated stops
+                if (wasStreaming && !isUserStop && !destroyPending) {
+                    XLog.i(getLog("StopStream", "System stop (${event.reason}) – scheduling auto-restart in 3s"))
+                    coroutineScope.launch {
+                        delay(3000)
+                        if (projectionState.active == null && !projectionState.waitingForPermission && !destroyPending && !userRequestedStop) {
+                            XLog.i(getLog("StopStream", "Auto-restarting stream after system stop"))
+                            sendEvent(InternalEvent.StartStream(permissionEducationShown = true))
+                        }
+                    }
+                }
+            }
 
             is RtspEvent.Intentable.RecoverError,
             is InternalEvent.Destroy,
@@ -1374,15 +1393,35 @@ internal class RtspStreamingService(
                     } else {
                         clientController?.status = RtspClientStatus.ERROR
                     }
+                    // Always-stream: auto-recover from internal errors
+                    if (!destroyPending && !userRequestedStop) {
+                        XLog.i(getLog("InternalError", "Auto-recovering from error in 5s"))
+                        coroutineScope.launch {
+                            delay(5000)
+                            if (projectionState.active == null && !projectionState.waitingForPermission && !destroyPending && !userRequestedStop) {
+                                sendEvent(RtspEvent.Intentable.RecoverError)
+                            }
+                        }
+                    }
                 }
 
                 if (event is RtspEvent.Intentable.RecoverError) {
                     handler.removeMessages(RtspEvent.Priority.RECOVER_IGNORE)
                     handler.removeMessages(RtspEvent.Priority.START_PROJECTION)
                     val mode = rtspSettings.data.value.mode
-                    sendEvent(InternalEvent.InitState(clearIntent = true, mode = mode))
+                    sendEvent(InternalEvent.InitState(clearIntent = false, mode = mode))
                     if (mode == RtspSettings.Values.Mode.SERVER) {
                         sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "RecoverError"))
+                    }
+                    // Always-stream: after recovery, auto-start stream
+                    if (!userRequestedStop) {
+                        XLog.i(getLog("RecoverError", "Scheduling auto-start after recovery"))
+                        coroutineScope.launch {
+                            delay(3000)
+                            if (projectionState.active == null && !projectionState.waitingForPermission && !destroyPending && !userRequestedStop) {
+                                sendEvent(InternalEvent.StartStream(permissionEducationShown = true))
+                            }
+                        }
                     }
                 }
             }
