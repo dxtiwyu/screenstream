@@ -362,6 +362,8 @@ internal class MjpegStreamingService(
                 )
 
                 if (newInterfaces.isNotEmpty()) {
+                    // Clear address error now that network is back
+                    if (currentError is MjpegError.AddressNotFoundException) currentError = null
                     sendEvent(InternalEvent.StartServer(newInterfaces))
                 } else {
                     // Keep retrying with exponential backoff instead of giving up
@@ -372,7 +374,7 @@ internal class MjpegStreamingService(
                         else -> 5000L
                     }
                     sendEvent(InternalEvent.DiscoverAddress(event.reason, event.attempt + 1), delay)
-                    
+
                     // Show error only on first failure, but keep retrying in background
                     if (event.attempt == 3 && currentError == null) {
                         netInterfaces = emptyList()
@@ -387,10 +389,19 @@ internal class MjpegStreamingService(
                 if (pendingServer.not()) httpServer.stop(false)
                 httpServer.start(event.interfaces.toList())
 
+                val wasInError = currentError is MjpegError.AddressNotFoundException
+                if (wasInError) currentError = null
+
                 if (isStreaming.not() && mjpegSettings.data.value.htmlShowPressStart) bitmapStateFlow.value = getStartBitmap()
 
                 netInterfaces = event.interfaces
                 pendingServer = false
+
+                // Auto-restart stream if we had a cached projection intent (WiFi came back)
+                if (!isStreaming && !destroyPending && mediaProjectionIntent != null) {
+                    XLog.i(getLog("StartServer", "Network restored – auto-restarting stream with cached intent"))
+                    sendEvent(InternalEvent.AutoRestartStream("NetworkRestored"), 500)
+                }
             }
 
             is InternalEvent.StartStopFromWebPage -> when {

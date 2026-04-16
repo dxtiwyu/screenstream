@@ -340,6 +340,7 @@ internal class RtspStreamingService(
                                 currentError = RtspError.ServerError.AddressNotFoundException()
                             }
                         } else {
+                            val wasInAddressError = currentError is RtspError.ServerError.AddressNotFoundException
                             if (currentError is RtspError.ServerError.AddressNotFoundException) currentError = null
 
                             val port = rtspSettings.data.value.serverPort
@@ -378,6 +379,12 @@ internal class RtspStreamingService(
                             }
 
                             XLog.d(getLog("RtspServer", "(Re)start on ${netInterfaces.size} interfaces, protocol=$protocolPolicy"))
+
+                            // Auto-restart stream projection if network came back after an outage
+                            if (wasInAddressError && projectionState.active == null && projectionState.cachedIntent != null && !destroyPending) {
+                                XLog.i(getLog("RtspServer", "Network restored – auto-restarting stream projection"))
+                                sendEvent(InternalEvent.StartStream(permissionEducationShown = true), 500)
+                            }
                         }
                     }.onFailure {
                         XLog.w(getLog("DiscoverAddress", "Failed: ${it.message}"), it)
