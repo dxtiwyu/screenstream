@@ -56,17 +56,24 @@ public class MjpegModuleService : StreamingModuleService() {
             XLog.e(getLog("onStartCommand", "Failed to call startForeground(): ${e.message}"))
         }
 
+        // Handle external/shell calls with no intent or invalid intent
         if (intent == null) {
-            XLog.e(getLog("onStartCommand"), IllegalArgumentException("MjpegModuleService.onStartCommand: intent = null. Stop self, startId: $startId"))
-            stopSelfResult(startId)
+            XLog.w(getLog("onStartCommand", "Intent is null - treating as external start request"))
+            // Create a synthetic StartService event for external calls
+            handleExternalStart(startId)
             return START_STICKY
         }
+
         XLog.d(getLog("onStartCommand", "MjpegModuleService.INTENT_ID: ${intent.getStringExtra(INTENT_ID)}"))
 
-        val mjpegEvent = MjpegEvent.Intentable.fromIntent(intent) ?: run {
-            XLog.e(getLog("onStartCommand"), IllegalArgumentException("MjpegModuleService.onStartCommand: MjpegEvent = null, startId: $startId"))
+        val mjpegEvent = MjpegEvent.Intentable.fromIntent(intent)
+        if (mjpegEvent == null) {
+            XLog.w(getLog("onStartCommand", "MjpegEvent is null - treating as external start request"))
+            // Handle external shell command (am startservice)
+            handleExternalStart(startId)
             return START_STICKY
         }
+
         XLog.d(getLog("onStartCommand", "MjpegEvent: $mjpegEvent, startId: $startId"))
 
         val shouldDedupe = mjpegEvent is MjpegEvent.Intentable.StartService
@@ -96,6 +103,26 @@ public class MjpegModuleService : StreamingModuleService() {
         }
 
         return START_STICKY
+    }
+
+    private fun handleExternalStart(startId: Int) {
+        XLog.i(getLog("handleExternalStart", "External start detected (shell/adb). Activating module and starting service."))
+        
+        // Check if module is already active
+        if (!streamingModuleManager.isActive(MjpegStreamingModule.Id)) {
+            XLog.w(getLog("handleExternalStart", "Module not active. Service will remain in foreground but not stream until module is activated via UI."))
+            // Keep service alive in foreground, but don't try to stream
+            // User needs to open app at least once to initialize and grant screen capture permission
+            return
+        }
+        
+        // Module is active, start streaming
+        try {
+            mjpegStreamingModule.onServiceStart(this, "external_shell_start")
+            XLog.i(getLog("handleExternalStart", "Successfully started streaming from external call"))
+        } catch (e: Exception) {
+            XLog.e(getLog("handleExternalStart", "Failed to start streaming: ${e.message}"), e)
+        }
     }
 
     override fun onDestroy() {

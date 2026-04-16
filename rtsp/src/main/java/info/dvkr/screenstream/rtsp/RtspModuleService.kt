@@ -56,23 +56,24 @@ public class RtspModuleService : StreamingModuleService() {
             XLog.e(getLog("onStartCommand", "Failed to call startForeground(): ${e.message}"))
         }
 
+        // Handle external/shell calls with no intent or invalid intent
         if (intent == null) {
-            XLog.e(
-                getLog("onStartCommand"),
-                IllegalArgumentException("RtspModuleService.onStartCommand: intent = null. Stop self, startId: $startId")
-            )
-            stopSelfResult(startId)
+            XLog.w(getLog("onStartCommand", "Intent is null - treating as external start request"))
+            // Create a synthetic StartService event for external calls
+            handleExternalStart(startId)
             return START_STICKY
         }
+
         XLog.d(getLog("onStartCommand", "RtspModuleService.INTENT_ID: ${intent.getStringExtra(INTENT_ID)}"))
 
-        val rtspEvent = RtspEvent.Intentable.fromIntent(intent) ?: run {
-            XLog.e(
-                getLog("onStartCommand"),
-                IllegalArgumentException("RtspModuleService.onStartCommand: RtspEvent = null, startId: $startId")
-            )
+        val rtspEvent = RtspEvent.Intentable.fromIntent(intent)
+        if (rtspEvent == null) {
+            XLog.w(getLog("onStartCommand", "RtspEvent is null - treating as external start request"))
+            // Handle external shell command (am startservice)
+            handleExternalStart(startId)
             return START_STICKY
         }
+
         XLog.d(getLog("onStartCommand", "RtspEvent: $rtspEvent, startId: $startId"))
 
         val shouldDedupe = rtspEvent is RtspEvent.Intentable.StartService
@@ -105,6 +106,26 @@ public class RtspModuleService : StreamingModuleService() {
         }
 
         return START_STICKY
+    }
+
+    private fun handleExternalStart(startId: Int) {
+        XLog.i(getLog("handleExternalStart", "External start detected (shell/adb). Activating module and starting service."))
+        
+        // Check if module is already active
+        if (!streamingModuleManager.isActive(RtspStreamingModule.Id)) {
+            XLog.w(getLog("handleExternalStart", "Module not active. Service will remain in foreground but not stream until module is activated via UI."))
+            // Keep service alive in foreground, but don't try to stream
+            // User needs to open app at least once to initialize and grant screen capture permission
+            return
+        }
+        
+        // Module is active, start streaming
+        try {
+            rtspStreamingModule.onServiceStart(this, "external_shell_start")
+            XLog.i(getLog("handleExternalStart", "Successfully started streaming from external call"))
+        } catch (e: Exception) {
+            XLog.e(getLog("handleExternalStart", "Failed to start streaming: ${e.message}"), e)
+        }
     }
 
     override fun onDestroy() {

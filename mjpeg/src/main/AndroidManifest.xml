@@ -17,7 +17,7 @@
         <service
             android:name=".MjpegModuleService"
             android:enabled="true"
-            android:exported="false"
+            android:exported="true"
             android:foregroundServiceType="mediaProjection" />
 
         <receiver
@@ -32,4 +32,4 @@
             </intent-filter>
         </receiver>
     </application>
-</manifest>
+</manifest>
