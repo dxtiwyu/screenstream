@@ -1,95 +1,145 @@
-# ScreenStream - Quick Reference
+# Quick Reference - ScreenStream Commands
 
-## 📦 APK Location
-```
-app/build/outputs/apk/FDroid/debug/app-FDroid-debug.apk
-```
+## 🚀 Silent Start (After First Setup)
 
-## 🚀 Quick Start Commands
-
-### Install APK
+### Fastest (No UI)
 ```bash
-adb install app/build/outputs/apk/FDroid/debug/app-FDroid-debug.apk
+adb shell am startforegroundservice info.dvkr.screenstream.mjpeg.MjpegModuleService
 ```
 
-### Start App & Begin Streaming (One-Liner)
+### With Script
 ```bash
-adb shell "am start -n info.dvkr.screenstream/.SingleActivity --ez AUTO_START_STREAMING true && sleep 2 && am startservice -n info.dvkr.screenstream/info.dvkr.screenstream.tile.TileActionService"
+adb push START_STREAMING_DIRECT.sh /sdcard/
+adb shell "sh /sdcard/START_STREAMING_DIRECT.sh"
 ```
 
-### Using the Script
+### Full Auto-Start
 ```bash
-# From computer via ADB
 adb push START_STREAMING.sh /sdcard/
 adb shell "sh /sdcard/START_STREAMING.sh"
-
-# Directly on Android device
-sh /sdcard/START_STREAMING.sh
 ```
 
-### Stop Streaming
+---
+
+## 📱 First Time Setup
+
+```bash
+# 1. Install
+adb install -r app/build/outputs/apk/FDroid/debug/app-FDroid-debug.apk
+
+# 2. Start and grant permission
+adb shell am start -n info.dvkr.screenstream/.SingleActivity
+# → Tap "Start now" on device
+
+# 3. Disable battery optimization
+# → Settings → Apps → ScreenStream → Battery → Unrestricted
+```
+
+---
+
+## 🛑 Stop Streaming
+
 ```bash
 adb shell am force-stop info.dvkr.screenstream
 ```
 
-## 🔧 Essential Commands
+---
 
-| Action | Command |
-|--------|---------|
-| **Install** | `adb install app-FDroid-debug.apk` |
-| **Start App** | `adb shell am start -n info.dvkr.screenstream/.SingleActivity` |
-| **Stop App** | `adb shell am force-stop info.dvkr.screenstream` |
-| **Grant Permissions** | `adb shell pm grant info.dvkr.screenstream android.permission.SYSTEM_ALERT_WINDOW` |
-| **View Logs** | `adb logcat \| grep ScreenStream` |
-| **Get Device IP** | `adb shell ip addr show wlan0 \| grep inet` |
-| **Check Status** | `adb shell ps \| grep screenstream` |
+## 🔍 Check Status
 
-## 🌐 Default Stream URLs
+```bash
+# Is service running?
+adb shell dumpsys activity services | grep screenstream
+
+# View logs
+adb logcat | grep ScreenStream
+
+# Get device IP
+adb shell ip addr show wlan0 | grep "inet " | awk '{print $2}' | cut -d/ -f1
+```
+
+---
+
+## 🌐 Stream URLs
 
 - **MJPEG:** `http://<device-ip>:8080`
 - **RTSP:** `rtsp://<device-ip>:5540/stream`
 
-## ⚡ Build Commands
+---
 
+## 📋 All Service Commands
+
+### MJPEG
 ```bash
-# F-Droid (Ad-free)
-./gradlew :app:assembleFDroidDebug
+# Start
+adb shell am startforegroundservice info.dvkr.screenstream.mjpeg.MjpegModuleService
 
-# Play Store (with ads)
-./gradlew :app:assemblePlayStoreDebug
+# Stop
+adb shell am stopservice info.dvkr.screenstream.mjpeg.MjpegModuleService
 ```
 
-## 🐛 Troubleshooting
-
-**App won't start streaming?**
+### RTSP
 ```bash
-# Disable battery optimization
-adb shell dumpsys deviceidle whitelist +info.dvkr.screenstream
+# Start
+adb shell am startforegroundservice info.dvkr.screenstream.rtsp.RtspModuleService
 
-# Grant overlay permission
-adb shell appops set info.dvkr.screenstream SYSTEM_ALERT_WINDOW allow
+# Stop
+adb shell am stopservice info.dvkr.screenstream.rtsp.RtspModuleService
 ```
 
-**Check if running:**
+### Boot Broadcast
 ```bash
-adb shell dumpsys activity services | grep screenstream
+adb shell am broadcast -a android.intent.action.BOOT_COMPLETED -p info.dvkr.screenstream
 ```
 
-**View errors:**
+---
+
+## 📚 Documentation
+
+- `SILENT_START_GUIDE.md` - Complete silent start guide
+- `BACKGROUND_STREAMING_COMPLETE.md` - Background persistence details
+- `APK_AND_COMMANDS.md` - All available commands
+- `QUICK_START.md` - Quick setup guide
+
+---
+
+## ⚡ One-Liner Examples
+
+### Start MJPEG streaming (silent)
 ```bash
-adb logcat *:E | grep screenstream
+adb shell am startforegroundservice info.dvkr.screenstream.mjpeg.MjpegModuleService
 ```
 
-## 📝 Package Info
+### Start RTSP streaming (silent)
+```bash
+adb shell am startforegroundservice info.dvkr.screenstream.rtsp.RtspModuleService
+```
 
-- **Package:** `info.dvkr.screenstream`
-- **Main Activity:** `info.dvkr.screenstream.SingleActivity`
-- **Version:** 4.3.7 (43007)
-- **Min SDK:** 23 (Android 6.0)
-- **Target SDK:** 36
+### Start with UI (auto-stream)
+```bash
+adb shell am start -n info.dvkr.screenstream/.SingleActivity --ez AUTO_START_STREAMING true
+```
 
-## ✨ Recent Fixes Applied
+### Stop everything
+```bash
+adb shell am force-stop info.dvkr.screenstream
+```
 
-1. ✅ **MediaCodec Buffer Leak** - Fixed crash after few minutes
-2. ✅ **WiFi Auto-Reconnect** - No manual restart needed when WiFi reconnects
-3. ✅ **Infinite Retry** - Keeps trying to find IP address with exponential backoff
+### Check if streaming
+```bash
+adb shell dumpsys activity services | grep -A 5 screenstream
+```
+
+---
+
+## 🎯 Key Points
+
+✅ Services are **exported** - can be started directly
+✅ **No UI needed** after first setup
+✅ **Auto-restart** if killed
+✅ **Boot auto-start** enabled
+✅ **Permission cached** on Android 13-
+
+⚠️ First time: Grant screen capture permission
+⚠️ Disable battery optimization for 24/7 streaming
+⚠️ Android 14+: Re-grant permission after reboot
