@@ -470,6 +470,8 @@ internal class RtspStreamingService(
         private var generation: Long = 0L
         // Tracks consecutive auto-reconnect attempts to drive exponential backoff
         var reconnectAttempt: Int = 0
+        // Timestamp when the current reconnect loop started (0 = not reconnecting)
+        var reconnectLoopStartedAt: Long = 0L
 
         fun startClient(rtspUrl: RtspUrl, onlyVideo: Boolean) {
             currentError = null
@@ -508,6 +510,7 @@ internal class RtspStreamingService(
                     status = RtspClientStatus.ACTIVE
                     currentError = null
                     reconnectAttempt = 0
+                    reconnectLoopStartedAt = 0L
                 }
 
                 is InternalEvent.RtspClient.OnDisconnect -> {
@@ -536,6 +539,8 @@ internal class RtspStreamingService(
             }
             if (rtspSettings.data.value.mode != RtspSettings.Values.Mode.CLIENT) return
             val attempt = reconnectAttempt
+            // Start the 20-hour watchdog clock on the first attempt
+            if (reconnectLoopStartedAt == 0L) reconnectLoopStartedAt = SystemClock.elapsedRealtime()
             // Exponential backoff capped at 15s; first attempt uses initialDelayMs
             val delay = if (attempt == 0) initialDelayMs else when {
                 attempt < 3 -> 3000L
@@ -978,6 +983,16 @@ internal class RtspStreamingService(
                     XLog.d(getLog("ClientAutoReconnect", "Waiting for permission. Ignoring."))
                     return
                 }
+
+                // 20-hour watchdog: if we've been failing to connect for ≥20h, kill the service
+                val loopStart = clientController?.reconnectLoopStartedAt ?: 0L
+                val maxReconnectMs = 20L * 60 * 60 * 1000 // 20 hours
+                if (loopStart > 0L && (SystemClock.elapsedRealtime() - loopStart) >= maxReconnectMs) {
+                    XLog.w(getLog("ClientAutoReconnect", "20-hour reconnect limit reached. Destroying service."))
+                    sendEvent(InternalEvent.Destroy(SupervisorJob()))
+                    return
+                }
+
                 // Tear down current attempt if anything is alive (network change, IP change, etc.)
                 if (projectionState.active != null) {
                     XLog.i(getLog("ClientAutoReconnect", "Stream is active – tearing down before reconnect (reason=${event.reason})"))
