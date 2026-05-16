@@ -347,13 +347,16 @@ internal class RtspClient(
             } finally {
                 withContext(NonCancellable) {
                     tcpSocket?.let { socket ->
-                        socket.withWriteLock {
-                            if (isConnected()) {
-                                runCatching { writeAndFlush(commandsManager.createTeardown()) }
+                        // Bounded teardown: dead networks must not freeze the caller (RTSP handler thread).
+                        withTimeoutOrNull(2_000) {
+                            socket.withWriteLock {
+                                if (isConnected()) {
+                                    runCatching { writeAndFlush(commandsManager.createTeardown()) }
+                                }
                             }
+                            runCatching { commandsManager.getResponseWithTimeout(socket, RtspBaseMessageHandler.Method.TEARDOWN, timeoutMs = 1_000) }
                         }
-                        runCatching { commandsManager.getResponseWithTimeout(socket, RtspBaseMessageHandler.Method.TEARDOWN) }
-                        socket.close()
+                        runCatching { socket.close() }
                     }
                 }
 
@@ -370,13 +373,25 @@ internal class RtspClient(
 
     internal fun disconnect() = runBlocking {
         XLog.d(this@RtspClient.getLog("disconnect"))
-        connectionJob.getAndSet(null)?.cancelAndJoin()
+        // Bounded: never let a stuck teardown block the caller (RTSP handler thread).
+        withTimeoutOrNull(3_000) {
+            connectionJob.getAndSet(null)?.cancelAndJoin()
+        } ?: run {
+            XLog.w(this@RtspClient.getLog("disconnect", "Timeout while cancelling connection job"))
+            connectionJob.getAndSet(null)?.cancel()
+        }
         XLog.d(this@RtspClient.getLog("disconnect", "Done"))
     }
 
     internal fun destroy() = runBlocking {
         XLog.d(this@RtspClient.getLog("destroy"))
-        connectionJob.getAndSet(null)?.cancelAndJoin()
+        // Bounded teardown: never let dead networks freeze the caller (RTSP handler thread).
+        withTimeoutOrNull(3_000) {
+            connectionJob.getAndSet(null)?.cancelAndJoin()
+        } ?: run {
+            XLog.w(this@RtspClient.getLog("destroy", "Timeout while cancelling connection job"))
+            connectionJob.getAndSet(null)?.cancel()
+        }
         runCatching { selectorManager.close() }
         scope.cancel()
         XLog.d(this@RtspClient.getLog("destroy", "Done"))
@@ -557,13 +572,14 @@ internal class RtspClient(
                 val method = if (hasSession) RtspBaseMessageHandler.Method.GET_PARAMETER else RtspBaseMessageHandler.Method.OPTIONS
                 var message = if (hasSession) commandsManager.createGetParameter() else commandsManager.createOptions()
                 tcpSocket.withWriteLock { writeAndFlush(message) }
-                var response = commandsManager.getResponseWithTimeout(tcpSocket, method)
+                // Tighter timeout so dead networks are detected quickly (~7s instead of 15s)
+                var response = commandsManager.getResponseWithTimeout(tcpSocket, method, timeoutMs = 7_000)
                 if (response.status == 401) {
                     if (rtspUrl.hasAuth().not()) throw RtspError.ClientError.NoCredentialsError()
                     commandsManager.applyAuthFor(method, rtspUrl.fullPath, response.text)
                     message = if (hasSession) commandsManager.createGetParameter() else commandsManager.createOptions()
                     tcpSocket.withWriteLock { writeAndFlush(message) }
-                    response = commandsManager.getResponseWithTimeout(tcpSocket, method)
+                    response = commandsManager.getResponseWithTimeout(tcpSocket, method, timeoutMs = 7_000)
                 }
                 when (response.status) {
                     200 -> Unit

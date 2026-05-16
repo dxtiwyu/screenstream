@@ -12,14 +12,17 @@ import android.media.MediaCodec
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.Message
+import android.os.PowerManager
 import android.os.SystemClock
 import android.view.Surface
 import android.widget.Toast
+import android.annotation.SuppressLint
 import androidx.annotation.AnyThread
 import androidx.annotation.MainThread
 import androidx.core.content.ContextCompat
@@ -83,6 +86,11 @@ internal class RtspStreamingService(
 
     private val appVersion = service.getVersionName()
     private val projectionManager = service.application.getSystemService(MediaProjectionManager::class.java)
+    private val powerManager: PowerManager = service.application.getSystemService(PowerManager::class.java)
+    private val wifiManager: WifiManager? = service.application.applicationContext.getSystemService(WifiManager::class.java)
+
+    @Volatile private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var wifiLock: WifiManager.WifiLock? = null
     private val handler: Handler by lazy(LazyThreadSafetyMode.NONE) { Handler(looper, this) }
     private val mainHandler: Handler by lazy(LazyThreadSafetyMode.NONE) { Handler(Looper.getMainLooper()) }
     private val coroutineDispatcher: CoroutineDispatcher by lazy(LazyThreadSafetyMode.NONE) { handler.asCoroutineDispatcher("RTSP-HT_Dispatcher") }
@@ -460,6 +468,8 @@ internal class RtspStreamingService(
 
         private var client: RtspClient? = null
         private var generation: Long = 0L
+        // Tracks consecutive auto-reconnect attempts to drive exponential backoff
+        var reconnectAttempt: Int = 0
 
         fun startClient(rtspUrl: RtspUrl, onlyVideo: Boolean) {
             currentError = null
@@ -497,11 +507,14 @@ internal class RtspStreamingService(
                 is InternalEvent.RtspClient.OnConnectionSuccess -> {
                     status = RtspClientStatus.ACTIVE
                     currentError = null
+                    reconnectAttempt = 0
                 }
 
                 is InternalEvent.RtspClient.OnDisconnect -> {
                     stopStream(stopServer = true, stopReason = "RtspClientDisconnect")
                     status = RtspClientStatus.IDLE
+                    // Always-stream: auto-reconnect after clean disconnect (e.g. server closed connection)
+                    scheduleClientReconnect("OnDisconnect", initialDelayMs = 2000)
                 }
 
                 is InternalEvent.RtspClient.OnBitrate -> Unit //TODO Skip for now
@@ -510,8 +523,27 @@ internal class RtspStreamingService(
                     stopStream(stopServer = true, stopReason = "RtspClientError")
                     status = RtspClientStatus.ERROR
                     currentError = event.error
+                    // Always-stream: auto-reconnect on error (network drop, timeout, server gone, etc.)
+                    scheduleClientReconnect("OnError:${event.error.javaClass.simpleName}", initialDelayMs = 3000)
                 }
             }
+        }
+
+        fun scheduleClientReconnect(reason: String, initialDelayMs: Long) {
+            if (userRequestedStop || destroyPending) {
+                XLog.i(getLog("scheduleClientReconnect", "Skipping (userStop=$userRequestedStop, destroy=$destroyPending)"))
+                return
+            }
+            if (rtspSettings.data.value.mode != RtspSettings.Values.Mode.CLIENT) return
+            val attempt = reconnectAttempt
+            // Exponential backoff capped at 15s; first attempt uses initialDelayMs
+            val delay = if (attempt == 0) initialDelayMs else when {
+                attempt < 3 -> 3000L
+                attempt < 6 -> 7000L
+                else -> 15000L
+            }
+            XLog.i(getLog("scheduleClientReconnect", "reason=$reason attempt=$attempt delay=${delay}ms"))
+            sendEvent(InternalEvent.ClientAutoReconnect(reason, attempt), delay)
         }
 
         fun setVideoParams(video: VideoParams) {
@@ -534,6 +566,7 @@ internal class RtspStreamingService(
         data class ModeChanged(val mode: RtspSettings.Values.Mode) : InternalEvent(Priority.RECOVER_IGNORE)
         data class StartStream(val permissionEducationShown: Boolean) : InternalEvent(Priority.RECOVER_IGNORE)
         data object RetryBindings : InternalEvent(Priority.RECOVER_IGNORE)
+        data class ClientAutoReconnect(val reason: String, val attempt: Int) : InternalEvent(Priority.RECOVER_IGNORE)
         data class AudioCaptureError(val cause: Throwable) : InternalEvent(Priority.RECOVER_IGNORE)
 
         data class OnAudioParamsChange(val micMute: Boolean, val deviceMute: Boolean, val micVolume: Float, val deviceVolume: Float) :
@@ -614,8 +647,17 @@ internal class RtspStreamingService(
             supervisorJob,
             onScreenOff = { /* Never stop streaming on screen off - persistent mode */ },
             onConnectionChanged = {
-                if (rtspSettings.data.value.mode == RtspSettings.Values.Mode.SERVER)
-                    sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "ConnectionChanged"), timeout = 150)
+                when (rtspSettings.data.value.mode) {
+                    RtspSettings.Values.Mode.SERVER ->
+                        sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "ConnectionChanged"), timeout = 150)
+
+                    RtspSettings.Values.Mode.CLIENT -> {
+                        // Network changed (wifi on/off, IP change, mobile<->wifi handover).
+                        // Tear the current attempt down (if any) and reconnect quickly.
+                        XLog.i(getLog("onConnectionChanged", "Client mode – forcing reconnect"))
+                        sendEvent(InternalEvent.ClientAutoReconnect("ConnectionChanged", 0), timeout = 500)
+                    }
+                }
             }
         )
 
@@ -685,6 +727,7 @@ internal class RtspStreamingService(
     suspend fun destroyService() {
         XLog.d(getLog("destroyService"))
 
+        releaseStreamingLocks()
         supervisorJob.cancel()
 
         val destroyJob = Job()
@@ -919,6 +962,36 @@ internal class RtspStreamingService(
                     return
                 }
                 sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "RetryBindings"))
+            }
+
+            is InternalEvent.ClientAutoReconnect -> {
+                if (userRequestedStop || destroyPending) {
+                    XLog.d(getLog("ClientAutoReconnect", "Skipping (userStop=$userRequestedStop, destroy=$destroyPending)"))
+                    return
+                }
+                val mode = rtspSettings.data.value.mode
+                if (mode != RtspSettings.Values.Mode.CLIENT) {
+                    XLog.d(getLog("ClientAutoReconnect", "Mode changed to $mode. Ignoring."))
+                    return
+                }
+                if (projectionState.waitingForPermission) {
+                    XLog.d(getLog("ClientAutoReconnect", "Waiting for permission. Ignoring."))
+                    return
+                }
+                // Tear down current attempt if anything is alive (network change, IP change, etc.)
+                if (projectionState.active != null) {
+                    XLog.i(getLog("ClientAutoReconnect", "Stream is active – tearing down before reconnect (reason=${event.reason})"))
+                    stopStream(stopServer = true, stopReason = "ClientAutoReconnect:${event.reason}")
+                    // Re-queue the actual restart shortly to let the dead socket close
+                    sendEvent(InternalEvent.ClientAutoReconnect(event.reason, event.attempt), timeout = 1500)
+                    return
+                }
+                clientController?.reconnectAttempt = event.attempt + 1
+                // Clear stale error so the UI/notification doesn't get stuck
+                if (currentError is RtspError.ClientError) currentError = null
+                clientController?.status = RtspClientStatus.IDLE
+                XLog.i(getLog("ClientAutoReconnect", "Restarting client stream (reason=${event.reason}, attempt=${event.attempt})"))
+                sendEvent(InternalEvent.StartStream(permissionEducationShown = true))
             }
 
             is RtspEvent.CastPermissionsDenied -> {
@@ -1195,6 +1268,8 @@ internal class RtspStreamingService(
                             deviceConfiguration = deviceConfiguration,
                             onVideoReconfigureStart = { clientController?.beginVideoReconfigure() }
                         )
+                        // Acquire wake/wifi locks so streaming survives screen-off and wifi power save
+                        acquireStreamingLocks()
                         resizeActor?.close()
                         resizeActor = ResizeConflateActor(
                             projection = projectionState.active!!,
@@ -1489,6 +1564,8 @@ internal class RtspStreamingService(
         projectionState.lastAudioParams = null
         projectionCoordinator.stop()
 
+        releaseStreamingLocks()
+
         if (wasStreaming) {
             sessionAnalyticsTracker.onEnded(stopReason, activeConsumersAtStop)
         }
@@ -1508,6 +1585,34 @@ internal class RtspStreamingService(
         if (audioIssueToastShown) return
         audioIssueToastShown = true
         mainHandler.post { Toast.makeText(service, R.string.rtsp_audio_capture_issue_detected, Toast.LENGTH_LONG).show() }
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireStreamingLocks() {
+        runCatching {
+            if (wakeLock?.isHeld != true) {
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenStream::RTSP-Tag").apply { acquire() }
+            }
+        }.onFailure { XLog.w(getLog("acquireStreamingLocks", "wakeLock: ${it.message}"), it) }
+
+        runCatching {
+            if (wifiLock?.isHeld != true) {
+                @Suppress("DEPRECATION")
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                else WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                wifiLock = wifiManager?.createWifiLock(mode, "ScreenStream::RTSP-Wifi")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+        }.onFailure { XLog.w(getLog("acquireStreamingLocks", "wifiLock: ${it.message}"), it) }
+    }
+
+    private fun releaseStreamingLocks() {
+        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+        wakeLock = null
+        runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
+        wifiLock = null
     }
 
     private fun Throwable.toVideoPipelineError(): RtspError.UnknownError =

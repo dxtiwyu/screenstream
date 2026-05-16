@@ -33,7 +33,7 @@ internal class RtspClientMessageHandler(
 
     internal fun hasSession(): Boolean = sessionId.isNotBlank()
 
-    internal fun getSuggestedKeepAliveDelayMs(defaultMs: Long = 60_000): Long {
+    internal fun getSuggestedKeepAliveDelayMs(defaultMs: Long = 20_000): Long {
         val timeoutSec = sessionTimeoutSec
         if (timeoutSec == null || timeoutSec <= 0) return defaultMs
         val ms = (timeoutSec - 5).coerceAtLeast(5) * 1000L
