@@ -13,6 +13,7 @@ internal data class WebRtcState(
     val streamId: String = "",
     val streamPassword: String = "",
     val waitingCastPermission: Boolean = false,
+    val startAttemptId: String? = null,
     val isStreaming: Boolean = false,
     val networkRecovery: Boolean = false,
     val clients: List<Client> = emptyList(),
@@ -22,7 +23,7 @@ internal data class WebRtcState(
     internal data class Client(val id: String, val publicId: String, val address: String)
 
     override fun toString(): String =
-        "WebRtcState(isBusy=$isBusy, streamId='$streamId', wCP=$waitingCastPermission, isStreaming=$isStreaming, networkRecovery=$networkRecovery, clients=${clients.size}, error=$error)"
+        "WebRtcState(busy=$isBusy stream=$streamId wait=$waitingCastPermission start=$startAttemptId str=$isStreaming netRec=$networkRecovery clients=${clients.size} err=$error)"
 }
 
 @Immutable
@@ -52,9 +53,17 @@ internal sealed class WebRtcError(@field:StringRes open val id: Int, override va
             context.getString(id) + " [$message] : ${if (cause?.message != null) cause.message else ""} "
     }
 
+    internal class SignalingServerUnavailable(override val message: String?, override val cause: Throwable?) :
+        WebRtcError(R.string.webrtc_error_signaling_server_unavailable)
+
     internal class NotificationPermissionRequired : WebRtcError(R.string.webrtc_notification_permission_required)
 
     internal class IncompleteInstallation(override val cause: Throwable?) : WebRtcError(R.string.webrtc_error_incomplete_installation)
+
+    internal class ScreenCaptureStartBlocked(override val cause: Throwable?) : WebRtcError(R.string.webrtc_error_screen_capture_start_blocked)
+    internal class ProjectionAcquireRejected(override val cause: Throwable?) : WebRtcError(R.string.webrtc_error_projection_acquire_rejected)
+    internal class AudioPermissionRequired : WebRtcError(R.string.webrtc_error_audio_permission_required)
+    internal class AudioStartBlocked(override val cause: Throwable?) : WebRtcError(R.string.webrtc_error_audio_start_blocked)
 
     internal class UnknownError(override val cause: Throwable?) : WebRtcError(R.string.webrtc_error_unspecified) {
         override fun toString(context: Context): String = context.getString(id) + " [${cause?.message}]"
@@ -62,6 +71,12 @@ internal sealed class WebRtcError(@field:StringRes open val id: Int, override va
 
     internal open fun toString(context: Context): String = if (id != 0) context.getString(id) else message ?: toString()
 }
+
+internal fun WebRtcError.isStartupPolicyError(): Boolean =
+    this is WebRtcError.ScreenCaptureStartBlocked ||
+            this is WebRtcError.ProjectionAcquireRejected ||
+            this is WebRtcError.AudioPermissionRequired ||
+            this is WebRtcError.AudioStartBlocked
 
 internal fun WebRtcError.PlayIntegrityError.isExpectedEnvironmentIssue(): Boolean = when (code) {
     StandardIntegrityErrorCode.PLAY_STORE_NOT_FOUND,

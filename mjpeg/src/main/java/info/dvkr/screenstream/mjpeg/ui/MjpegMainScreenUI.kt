@@ -27,13 +27,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.dropUnlessStarted
+import info.dvkr.screenstream.common.getAppSettingsIntent
 import info.dvkr.screenstream.common.module.StreamingModule
 import info.dvkr.screenstream.common.notification.NotificationHelper
 import info.dvkr.screenstream.common.ui.DoubleClickProtection
-import info.dvkr.screenstream.common.ui.ScreenCapturePermissionWithEducation
 import info.dvkr.screenstream.common.ui.get
-import info.dvkr.screenstream.common.ui.rememberScreenCapturePermissionWithEducationState
-import info.dvkr.screenstream.mjpeg.MjpegModuleService
+import info.dvkr.screenstream.common.ui.mediaprojection.ScreenCapturePermissionFlow
+import info.dvkr.screenstream.common.ui.mediaprojection.rememberScreenCaptureStartRequester
 import info.dvkr.screenstream.mjpeg.R
 import info.dvkr.screenstream.mjpeg.internal.MjpegEvent
 import info.dvkr.screenstream.mjpeg.internal.MjpegStreamingService
@@ -55,6 +55,7 @@ import org.koin.compose.koinInject
 internal fun MjpegMainScreenUI(
     mjpegStateFlow: StateFlow<MjpegState>,
     sendEvent: (event: MjpegEvent) -> Unit,
+    onProjectionGranted: (startAttemptId: String, intent: android.content.Intent) -> Unit,
     windowWidthSizeClass: StreamingModule.WindowWidthSizeClass,
     modifier: Modifier = Modifier,
     mjpegSettings: MjpegSettings = koinInject(),
@@ -63,7 +64,7 @@ internal fun MjpegMainScreenUI(
     val mjpegState = mjpegStateFlow.collectAsStateWithLifecycle()
     val mjpegSettingsState = mjpegSettings.data.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val screenCapturePermissionWithEducationState = rememberScreenCapturePermissionWithEducationState()
+    val screenCaptureStartRequester = rememberScreenCaptureStartRequester()
     val context = LocalContext.current
     val state = mjpegState.value
     val settings = mjpegSettingsState.value
@@ -72,13 +73,21 @@ internal fun MjpegMainScreenUI(
     }
 
     BoxWithConstraints(modifier = modifier) {
-        ScreenCapturePermissionWithEducation(
-            state = screenCapturePermissionWithEducationState,
-            shouldRequestPermission = state.waitingCastPermission,
-            isStreaming = state.isStreaming,
-            onStartRequested = { educationShown -> sendEvent(MjpegStreamingService.InternalEvent.StartStream(permissionEducationShown = educationShown)) },
-            onPermissionGranted = { intent -> if (state.waitingCastPermission) MjpegModuleService.startProjection(context, intent) },
-            onPermissionDenied = { if (state.waitingCastPermission) sendEvent(MjpegEvent.CastPermissionsDenied) },
+        ScreenCapturePermissionFlow(
+            startRequester = screenCaptureStartRequester,
+            permissionScopeKey = "mjpeg",
+            startAttemptId = state.startAttemptId?.takeIf { state.waitingCastPermission },
+            onStartRequested = onStartRequested@{ educationShown ->
+                if (state.isStreaming) return@onStartRequested
+                sendEvent(
+                    MjpegStreamingService.InternalEvent.StartStream(
+                        permissionEducationShown = educationShown,
+                        clearStartupPolicyError = state.error?.isStartupPolicyError() == true
+                    )
+                )
+            },
+            onPermissionGranted = { startAttemptId, intent -> if (state.startAttemptId == startAttemptId) onProjectionGranted(startAttemptId, intent) },
+            onPermissionDenied = { startAttemptId -> if (state.startAttemptId == startAttemptId) sendEvent(MjpegEvent.CastPermissionsDenied(startAttemptId)) },
         )
 
         val lazyVerticalStaggeredGridState = rememberLazyStaggeredGridState()
@@ -93,8 +102,12 @@ internal fun MjpegMainScreenUI(
                     ErrorCard(
                         error = it,
                         sendEvent = sendEvent,
+                        retryStartupPolicyError = { screenCaptureStartRequester.request() },
                         openNotificationSettings = {
                             context.startActivity(notificationHelper.getStreamNotificationSettingsIntent())
+                        },
+                        openLocalNetworkSettings = {
+                            context.startActivity(context.getAppSettingsIntent())
                         },
                         modifier = Modifier.padding(8.dp)
                     )
@@ -112,6 +125,14 @@ internal fun MjpegMainScreenUI(
                     onCreateNewPin = { sendEvent(MjpegEvent.CreateNewPin) },
                     modifier = Modifier.padding(8.dp)
                 )
+            }
+
+            item(key = "TRAFFIC") {
+                TrafficCard(traffic = state.traffic, modifier = Modifier.padding(8.dp))
+            }
+
+            item(key = "CLIENTS") {
+                ClientsCard(clients = state.clients, modifier = Modifier.padding(8.dp))
             }
 
             item(key = "SETTINGS_GENERAL") {
@@ -150,14 +171,6 @@ internal fun MjpegMainScreenUI(
                     modifier = Modifier.padding(8.dp)
                 )
             }
-
-            item(key = "TRAFFIC") {
-                TrafficCard(traffic = state.traffic, modifier = Modifier.padding(8.dp))
-            }
-
-            item(key = "CLIENTS") {
-                ClientsCard(clients = state.clients, modifier = Modifier.padding(8.dp))
-            }
         }
 
         LaunchedEffect(state.error) {
@@ -172,7 +185,7 @@ internal fun MjpegMainScreenUI(
                     if (state.isStreaming) {
                         sendEvent(MjpegEvent.Intentable.StopStream("User action: Button"))
                     } else {
-                        screenCapturePermissionWithEducationState.requestStart()
+                        screenCaptureStartRequester.request()
                     }
                 }
             },

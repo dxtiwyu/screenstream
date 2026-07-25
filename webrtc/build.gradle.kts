@@ -19,7 +19,6 @@ android {
 
     defaultConfig {
         minSdk = rootProject.extra["minSdkVersion"] as Int
-        consumerProguardFiles("consumer-rules.pro")
     }
 
     buildFeatures {
@@ -45,12 +44,11 @@ android {
 
 dependencies {
     implementation(projects.common)
+    implementation(projects.webrtcRuntime)
 
     implementation(libs.play.services.base)
     implementation(libs.play.services.tasks)
     implementation(libs.play.integrity)
-
-    // Local WebRTC m146.0.7680.66
 
     implementation(libs.socket)
     implementation(libs.okio)

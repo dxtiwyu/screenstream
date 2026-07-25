@@ -34,7 +34,7 @@ internal open class WebRtcEvent(val priority: Int) {
         }
 
         @Parcelize internal data class StartService(val token: String) : Intentable(Priority.NONE)
-        @Parcelize internal data class StartProjection(val intent: Intent) : Intentable(Priority.START_PROJECTION)
+        @Parcelize internal data class StartProjection(val startAttemptId: String, val intent: Intent) : Intentable(Priority.START_PROJECTION)
         @Parcelize internal data class StopStream(val reason: String) : Intentable(Priority.RECOVER_IGNORE)
         @Parcelize internal data object RecoverError : Intentable(Priority.RECOVER_IGNORE)
 
@@ -44,10 +44,10 @@ internal open class WebRtcEvent(val priority: Int) {
     internal data object GetNewStreamId : WebRtcEvent(Priority.DESTROY_IGNORE)
     internal data object CreateNewPassword : WebRtcEvent(Priority.DESTROY_IGNORE)
     internal data class StartProjection(
-        val intent: Intent, val foregroundStartProcessed: Boolean = false, val foregroundStartError: Throwable? = null
+        val startAttemptId: String, val intent: Intent, val foregroundStartProcessed: Boolean = false, val foregroundStartError: Throwable? = null
     ) : WebRtcEvent(Priority.START_PROJECTION)
     internal data class RemoveClient(val clientId: ClientId, val notifyServer: Boolean, val reason: String) : WebRtcEvent(Priority.RECOVER_IGNORE)
-    internal data object CastPermissionsDenied : WebRtcEvent(Priority.RECOVER_IGNORE)
+    internal data class CastPermissionsDenied(val startAttemptId: String) : WebRtcEvent(Priority.RECOVER_IGNORE)
     internal data object UpdateState : WebRtcEvent(Priority.RECOVER_IGNORE)
 }
 
@@ -114,3 +114,27 @@ internal value class MediaStreamId private constructor(val value: String) {
 }
 
 internal class LocalMediaSteam(val id: MediaStreamId, val videoTrack: VideoTrack, val audioTrack: AudioTrack)
+
+internal const val WEBRTC_PROTOCOL_VERSION: Int = 2
+
+@JvmInline
+internal value class AttemptId(val value: String) {
+    internal companion object {
+        internal val EMPTY: AttemptId = AttemptId("")
+        private val VALID_ATTEMPT_ID = Regex("^[A-Za-z0-9_-]{16,64}$")
+
+        internal fun random(): AttemptId = AttemptId(randomString(16))
+        internal fun validOrEmpty(value: String?): AttemptId =
+            if (value != null && VALID_ATTEMPT_ID.matches(value)) AttemptId(value) else EMPTY
+    }
+
+    internal fun isEmpty(): Boolean = value.isBlank()
+
+    override fun toString(): String = value
+}
+
+internal data class ClientSessionKey(val clientId: ClientId, val joinAttemptId: AttemptId)
+
+internal data class NegotiationKey(val session: ClientSessionKey, val attemptId: AttemptId) {
+    val clientId: ClientId get() = session.clientId
+}

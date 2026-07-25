@@ -40,16 +40,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowSizeClass
-import info.dvkr.screenstream.AdaptiveBanner
+import info.dvkr.screenstream.InlineAdaptiveBanner
 import info.dvkr.screenstream.R
 import info.dvkr.screenstream.common.notification.NotificationHelper
 import info.dvkr.screenstream.common.settings.AppSettings
-import info.dvkr.screenstream.logger.AppLogger
 import info.dvkr.screenstream.tile.TileActionService
 import info.dvkr.screenstream.ui.tabs.settings.app.AppLocaleDetail
 import info.dvkr.screenstream.ui.tabs.settings.app.AppLocaleRow
 import info.dvkr.screenstream.ui.tabs.settings.app.DynamicThemeRow
-import info.dvkr.screenstream.ui.tabs.settings.app.LoggingRow
 import info.dvkr.screenstream.ui.tabs.settings.app.NightModeDetail
 import info.dvkr.screenstream.ui.tabs.settings.app.NightModeRow
 import info.dvkr.screenstream.ui.tabs.settings.app.NotificationsRow
@@ -88,8 +86,6 @@ internal fun SettingsTabContent(
         listPane = {
             AnimatedPane(modifier = Modifier.preferredWidth(listPanePreferredWidth)) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    AdaptiveBanner(modifier = Modifier.fillMaxWidth())
-
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
@@ -125,6 +121,7 @@ internal fun SettingsTabContent(
                                     .fillMaxWidth()
                                     .animateItem()
                             ) {
+                                HorizontalDivider()
                                 NightModeRow(
                                     nightMode = settingsData.nightMode,
                                     onShowDetail = { scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, AppSetting.NIGHT_MODE) } })
@@ -176,17 +173,8 @@ internal fun SettingsTabContent(
                             }
                         }
 
-                        if (AppLogger.isLoggingOn) {
-                            item(key = "LOGGING", contentType = "ITEM") {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .animateItem()
-                                ) {
-                                    HorizontalDivider()
-                                    LoggingRow()
-                                }
-                            }
+                        item(key = "AD_BANNER", contentType = "AD") {
+                            InlineAdaptiveBanner(modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }

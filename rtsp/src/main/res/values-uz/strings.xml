@@ -2,9 +2,13 @@
 <resources>
     <string name="rtsp_error_recover">Tiklash</string>
     <string name="rtsp_error_open_settings">Sozlamalarni ochish</string>
+    <string name="rtsp_error_start_screen_sharing">Ekran ulashishni boshlash</string>
+    <string name="rtsp_error_start_with_audio">Audio bilan boshlash</string>
+    <string name="rtsp_error_allow_microphone">Mikrofonga ruxsat berish</string>
+    <string name="rtsp_error_local_network_permission_required">Qurilmalar translatsiyangizga ulanishi uchun mahalliy tarmoqqa kirish kerak.</string>
 
-    <string name="rtsp_stream_mode">RTSP rejimi (RTSP)</string>
-    <string name="rtsp_stream_mode_description">RTSP rejimi tavsifi</string>
+    <string name="rtsp_stream_mode">RTSP rejimi · RTSP</string>
+    <string name="rtsp_stream_mode_description">RTSP mijozi yoki serveri orqali translatsiya qiling</string>
     <string name="rtsp_stream_mode_details">
 - RTSP protokoli asosida ishlaydi.\n
 - Server rejimi (standart) ushbu qurilmani RTSP server sifatida ishlatadi.\n
@@ -22,7 +26,7 @@
     <string name="rtsp_mode_client_hint">Masofadagi RTSP serverga ulang</string>
 
     <string name="rtsp_interfaces_title">RTSP server manzili</string>
-    <string name="rtsp_interfaces_no_address">Manzil topilmadi.\nUlanishni tekshiring yoki Server parametrlari (Interfeys filtri, Manzil filtri).</string>
+    <string name="rtsp_interfaces_no_address">Manzil topilmadi.\nUlanishni tekshiring yoki server sozlamalarini o‘zgartiring (Interfeys filtri, Manzil filtri).</string>
     <string name="rtsp_interfaces_discovering">Manzillar qidirilmoqda…</string>
     <string name="rtsp_interfaces_interface_label">Interfeys:\n%1$s</string>
     <string name="rtsp_interfaces_description_copy">Manzilni nusxalash</string>
@@ -37,17 +41,21 @@
     <string name="rtsp_bind_error_permission_denied">Xato: Ruxsat rad etildi</string>
     <string name="rtsp_bind_error_unknown">Xato: Tinglovchi xatosi</string>
 
-    <string name="rtsp_server_parameters">Server parametrlari</string>
-    <string name="rtsp_client_parameters">Mijoz parametrlari</string>
+    <string name="rtsp_server_parameters">Server sozlamalari</string>
+    <string name="rtsp_client_parameters">Mijoz sozlamalari</string>
 
     <string name="rtsp_stream_start">Translyatsiyani boshlash</string>
     <string name="rtsp_stream_stop">Translyatsiyani to\'xtatish</string>
 
-    <string name="rtsp_error_notification_permission_required">Ilova translyatsiya xizmatini boshlash uchun bildirishnomalarni yoqishni talab qiladi.\nIlova sozlamalarida bildirishnomalarni yoqing.</string>
-    <string name="rtsp_error_ip_address_not_found">Manzil topilmadi. Ulanishni tekshiring yoki Server parametrlari (Interfeys filtri, Manzil filtri).</string>
+    <string name="rtsp_error_notification_permission_required">Bu ilovaga translatsiya xizmatini boshlash uchun bildirishnomalar yoqilgan bo\'lishi kerak.\nIlova sozlamalarida bildirishnomalarni yoqing.</string>
+    <string name="rtsp_error_screen_capture_start_blocked">Android ekran ulashishni boshlashni blokladi. ScreenStream ochiq tursin va qayta boshlang.</string>
+    <string name="rtsp_error_projection_acquire_rejected">Ekranni yozib olish ruxsati endi yaroqli emas. Ekran ulashishni qayta boshlang.</string>
+    <string name="rtsp_error_audio_permission_required">Audio bilan translatsiyani boshlash uchun mikrofon ruxsati kerak.</string>
+    <string name="rtsp_error_audio_start_blocked">Android audio ulashishni boshlashni blokladi. ScreenStream ochiq tursin va audio bilan qayta boshlang.</string>
+    <string name="rtsp_error_ip_address_not_found">Manzil topilmadi. Ulanishni tekshiring yoki server sozlamalarini o‘zgartiring (Interfeys filtri, Manzil filtri).</string>
     <string name="rtsp_error_unspecified">Xatolik yuz berdi.</string>
 
-    <string name="rtsp_media_server">Media server</string>
+    <string name="rtsp_media_server">Media serveri</string>
     <string name="rtsp_server_address">RTSP server manzili</string>
     <string name="rtsp_protocol">RTSP protokoli</string>
 
@@ -62,7 +70,7 @@
     <string name="rtsp_label_public_ipv6">Ommaviy IPv6</string>
     <string name="rtsp_label_loopback">Loopback</string>
 
-    <string name="rtsp_video_parameters">Video parametrlari</string>
+    <string name="rtsp_video_parameters">Video sozlamalari</string>
     <string name="rtsp_video_encoder">Video kodlovchi:</string>
     <string name="rtsp_video_encoder_auto">Avto</string>
     <string name="rtsp_video_resize_image">Tasvir o\'lchami: %1$.2f%%</string>
@@ -75,19 +83,19 @@
     <string name="rtsp_video_bitrate_mbit">%.2f Mbit</string>
     <string name="rtsp_video_bitrate_kbit">%d Kbit</string>
 
-    <string name="rtsp_audio_parameters">Audio parametrlari</string>
+    <string name="rtsp_audio_parameters">Audio sozlamalari</string>
     <string name="rtsp_audio_mic">Mikrofon</string>
     <string name="rtsp_audio_mic_mute">Mikrofonni o\'chirish</string>
-    <string name="rtsp_audio_device">Qurilma audiosi</string>
-    <string name="rtsp_audio_device_mute">Qurilma audiosini o\'chirish</string>
+    <string name="rtsp_audio_device">Ichki audio</string>
+    <string name="rtsp_audio_device_mute">Ichki audioni o\'chirish</string>
     <string name="rtsp_audio_encoder">Audio kodlovchi:</string>
     <string name="rtsp_audio_encoder_auto">Avto</string>
     <string name="rtsp_audio_bitrate">Audio bitreyt: %1$s/sek</string>
     <string name="rtsp_audio_permission_title">Audio yozishga ruxsat berish</string>
-    <string name="rtsp_audio_permission_message">Audio kontentni uzatish uchun ovoz yozishga ruxsat zarur.\n\nBu ruxsatsiz translyatsiya audiosiz bo\'ladi.</string>
+    <string name="rtsp_audio_permission_message">Audio translatsiya qilish uchun audio yozish ruxsati kerak.\n\nBusiz translatsiyada audio bo\'lmaydi.</string>
     <string name="rtsp_audio_permission_open_settings">Sozlamalarni ochish</string>
-    <string name="rtsp_audio_permission_message_settings">Audio kontentni uzatish uchun mikrofonga ruxsat zarur.\n\nBu ruxsatsiz translyatsiya audiosiz bo\'ladi.</string>
-    <string name="rtsp_audio_capture_issue_detected">Audio yozib olishda muammo aniqlandi</string>
+    <string name="rtsp_audio_permission_message_settings">Audio translatsiya qilish uchun ilova sozlamalarida mikrofon ruxsatini yoqing.\n\nBusiz translatsiyada audio bo\'lmaydi.</string>
+    <string name="rtsp_audio_capture_issue_detected">Audio yozib olish muammosi aniqlandi</string>
 
     <string name="rtsp_connection_access_denied">Kirish rad etildi</string>
     <string name="rtsp_connection_no_credentials">Foydalanuvchi nomi va parolni kiriting</string>
@@ -116,4 +124,6 @@
     <string name="rtsp_pref_server_port">Server porti</string>
     <string name="rtsp_pref_server_port_summary">Kiruvchi ulanishlar uchun portni o\'rnating</string>
     <string name="rtsp_pref_server_port_text">Kiruvchi ulanishlar uchun server portini o\'rnating.\nQiymatlar: 1025–65535\nStandart: 8554</string>
+    <string name="rtsp_pref_onvif_discovery">ONVIF aniqlash</string>
+    <string name="rtsp_pref_onvif_discovery_summary">ONVIF mijozlari bu strimni topsin. Faqat H.264 qo‘llab-quvvatlanadi</string>
 </resources>

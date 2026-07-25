@@ -10,6 +10,7 @@ import info.dvkr.screenstream.common.module.StreamingModuleService
 import info.dvkr.screenstream.webrtc.internal.WebRtcEvent
 import info.dvkr.screenstream.webrtc.ui.WebRtcError
 import info.dvkr.screenstream.webrtc.ui.isExpectedEnvironmentIssue
+import info.dvkr.screenstream.webrtc.ui.isStartupPolicyError
 import kotlinx.coroutines.runBlocking
 import org.koin.android.ext.android.inject
 import java.net.ConnectException
@@ -29,12 +30,12 @@ public class WebRtcModuleService : StreamingModuleService() {
         }
 
         @Throws(ServiceStartNotAllowedException::class)
-        internal fun startProjection(context: Context, permissionIntent: Intent, source: String = "ui_permission") {
-            val intent = WebRtcEvent.Intentable.StartProjection(permissionIntent).toIntent(context)
-            XLog.d(getLog("WebRtcModuleService.startProjection", "Run intent: ${intent.extras}"))
+        internal fun dispatchProjectionIntent(context: Context, startAttemptId: String, permissionIntent: Intent) {
+            val intent = WebRtcEvent.Intentable.StartProjection(startAttemptId, permissionIntent).toIntent(context)
+            XLog.d(getLog("WebRtcModuleService.dispatchProjectionIntent", "Run intent: ${intent.extras}"))
             val importance = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }.importance
-            XLog.i(getLog("WebRtcModuleService.startProjection", "RunningAppProcessInfo.importance: $importance"))
-            XLog.i(getLog("WebRtcModuleService.startProjection", "SP_TRACE route=preflight_v1 stage=service_command source=$source importance=$importance"))
+            XLog.i(getLog("WebRtcModuleService.dispatchProjectionIntent", "RunningAppProcessInfo.importance: $importance"))
+            XLog.i(getLog("WebRtcModuleService.dispatchProjectionIntent", "SP_TRACE route=service_cached_permission stage=service_command startAttemptId=$startAttemptId importance=$importance"))
             context.startService(intent)
         }
     }
@@ -90,8 +91,8 @@ public class WebRtcModuleService : StreamingModuleService() {
             when (webRtcEvent) {
                 is WebRtcEvent.Intentable.StartService -> webRtcStreamingModule.onServiceStart(this, webRtcEvent.token)
                 is WebRtcEvent.Intentable.StartProjection -> {
-                    XLog.i(getLog("onStartCommand", "SP_TRACE route=preflight_v1 stage=service_dispatch event=StartProjection startId=$startId"))
-                    webRtcStreamingModule.startProjection(webRtcEvent.intent)
+                    XLog.i(getLog("onStartCommand", "SP_TRACE route=service_cached_permission stage=service_dispatch event=StartProjection startAttemptId=${webRtcEvent.startAttemptId} startId=$startId"))
+                    webRtcStreamingModule.startProjection(webRtcEvent.startAttemptId, webRtcEvent.intent)
                 }
                 is WebRtcEvent.Intentable.StopStream -> webRtcStreamingModule.sendEvent(webRtcEvent)
                 WebRtcEvent.Intentable.RecoverError -> webRtcStreamingModule.sendEvent(webRtcEvent)
@@ -110,11 +111,15 @@ public class WebRtcModuleService : StreamingModuleService() {
         super.onDestroy()
     }
 
-    @Throws(WebRtcError.NotificationPermissionRequired::class, IllegalStateException::class)
+    @Throws(IllegalStateException::class)
     internal fun startForeground(fgsType: Int) {
-        XLog.d(getLog("startForeground", "foregroundNotificationsEnabled: ${notificationHelper.foregroundNotificationsEnabled()}"))
-
-        if (notificationHelper.notificationPermissionGranted(this).not()) throw WebRtcError.NotificationPermissionRequired()
+        XLog.d(
+            getLog(
+                "startForeground",
+                "fgsType=$fgsType notificationPermissionGranted=${notificationHelper.notificationPermissionGranted(this)} " +
+                        "foregroundNotificationsEnabled=${notificationHelper.foregroundNotificationsEnabled()}"
+            )
+        )
 
         startForeground(
             WebRtcEvent.Intentable.StopStream("WebRtcModuleService. User action: Notification").toIntent(this),
@@ -122,20 +127,23 @@ public class WebRtcModuleService : StreamingModuleService() {
         )
     }
 
-    internal fun showErrorNotification(error: WebRtcError) {
+    internal fun showErrorNotification(error: WebRtcError, showRecoverAction: Boolean = true) {
         if (error is WebRtcError.NotificationPermissionRequired) return
 
+        val startupPolicyError = error.isStartupPolicyError()
         if (error is WebRtcError.NetworkError && (error.cause is UnknownHostException || error.cause is ConnectException)) {
             XLog.i(getLog("showErrorNotification", "${error.javaClass.simpleName} ${error.cause}"))
         } else if (error is WebRtcError.PlayIntegrityError && error.isExpectedEnvironmentIssue()) {
             XLog.i(getLog("showErrorNotification", "Expected Play Integrity environment issue. code=${error.code}, message=${error.message}"))
+        } else if (startupPolicyError) {
+            XLog.i(getLog("showErrorNotification", "${error.javaClass.simpleName} ${error.cause}"))
         } else {
             XLog.e(getLog("showErrorNotification"), error)
         }
 
         showErrorNotification(
             message = error.toString(this),
-            recoverIntent = WebRtcEvent.Intentable.RecoverError.toIntent(this)
+            recoverIntent = if (showRecoverAction) WebRtcEvent.Intentable.RecoverError.toIntent(this) else null
         )
     }
 }

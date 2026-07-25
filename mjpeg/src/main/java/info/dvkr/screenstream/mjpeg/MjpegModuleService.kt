@@ -8,6 +8,7 @@ import info.dvkr.screenstream.common.getLog
 import info.dvkr.screenstream.common.module.StreamingModuleService
 import info.dvkr.screenstream.mjpeg.internal.MjpegEvent
 import info.dvkr.screenstream.mjpeg.ui.MjpegError
+import info.dvkr.screenstream.mjpeg.ui.isStartupPolicyError
 import kotlinx.coroutines.runBlocking
 import org.koin.android.ext.android.inject
 
@@ -23,12 +24,12 @@ public class MjpegModuleService : StreamingModuleService() {
             context.startService(intent)
         }
 
-        internal fun startProjection(context: Context, permissionIntent: Intent, source: String = "ui_permission") {
-            val intent = MjpegEvent.Intentable.StartProjection(permissionIntent).toIntent(context)
-            XLog.d(getLog("MjpegModuleService.startProjection", "Run intent: ${intent.extras}"))
+        internal fun dispatchProjectionIntent(context: Context, startAttemptId: String, permissionIntent: Intent) {
+            val intent = MjpegEvent.Intentable.StartProjection(startAttemptId, permissionIntent).toIntent(context)
+            XLog.d(getLog("MjpegModuleService.dispatchProjectionIntent", "Run intent: ${intent.extras}"))
             val importance = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }.importance
-            XLog.i(getLog("MjpegModuleService.startProjection", "RunningAppProcessInfo.importance: $importance"))
-            XLog.i(getLog("MjpegModuleService.startProjection", "SP_TRACE route=preflight_v1 stage=service_command source=$source importance=$importance"))
+            XLog.i(getLog("MjpegModuleService.dispatchProjectionIntent", "RunningAppProcessInfo.importance: $importance"))
+            XLog.i(getLog("MjpegModuleService.dispatchProjectionIntent", "SP_TRACE route=service_cached_permission stage=service_command startAttemptId=$startAttemptId importance=$importance"))
             context.startService(intent)
         }
     }
@@ -91,8 +92,8 @@ public class MjpegModuleService : StreamingModuleService() {
             when (mjpegEvent) {
                 is MjpegEvent.Intentable.StartService -> mjpegStreamingModule.onServiceStart(this, mjpegEvent.token)
                 is MjpegEvent.Intentable.StartProjection -> {
-                    XLog.i(getLog("onStartCommand", "SP_TRACE route=preflight_v1 stage=service_dispatch event=StartProjection startId=$startId"))
-                    mjpegStreamingModule.startProjection(mjpegEvent.intent)
+                    XLog.i(getLog("onStartCommand", "SP_TRACE route=service_cached_permission stage=service_dispatch event=StartProjection startAttemptId=${mjpegEvent.startAttemptId} startId=$startId"))
+                    mjpegStreamingModule.startProjection(mjpegEvent.startAttemptId, mjpegEvent.intent)
                 }
                 is MjpegEvent.Intentable.StopStream -> mjpegStreamingModule.sendEvent(mjpegEvent)
                 MjpegEvent.Intentable.RecoverError -> mjpegStreamingModule.sendEvent(mjpegEvent)
@@ -131,11 +132,15 @@ public class MjpegModuleService : StreamingModuleService() {
         super.onDestroy()
     }
 
-    @Throws(MjpegError.NotificationPermissionRequired::class, IllegalStateException::class)
+    @Throws(IllegalStateException::class)
     internal fun startForeground(fgsType: Int) {
-        XLog.d(getLog("startForeground", "foregroundNotificationsEnabled: ${notificationHelper.foregroundNotificationsEnabled()}"))
-
-        if (notificationHelper.notificationPermissionGranted(this).not()) throw MjpegError.NotificationPermissionRequired()
+        XLog.d(
+            getLog(
+                "startForeground",
+                "fgsType=$fgsType notificationPermissionGranted=${notificationHelper.notificationPermissionGranted(this)} " +
+                        "foregroundNotificationsEnabled=${notificationHelper.foregroundNotificationsEnabled()}"
+            )
+        )
 
         startForeground(
             MjpegEvent.Intentable.StopStream("MjpegModuleService. User action: Notification").toIntent(this),
@@ -144,9 +149,10 @@ public class MjpegModuleService : StreamingModuleService() {
     }
 
     internal fun showErrorNotification(error: MjpegError) {
-        if (error is MjpegError.NotificationPermissionRequired) return
+        if (error is MjpegError.NotificationPermissionRequired || error is MjpegError.LocalNetworkPermissionRequired) return
 
-        if (error is MjpegError.AddressNotFoundException || error is MjpegError.AddressInUseException) {
+        val startupPolicyError = error.isStartupPolicyError()
+        if (error is MjpegError.AddressNotFoundException || error is MjpegError.AddressInUseException || startupPolicyError) {
             XLog.i(getLog("showErrorNotification", "${error.javaClass.simpleName} ${error.cause}"))
         } else {
             XLog.e(getLog("showErrorNotification"), error)
@@ -154,7 +160,7 @@ public class MjpegModuleService : StreamingModuleService() {
 
         showErrorNotification(
             message = error.toString(this),
-            recoverIntent = MjpegEvent.Intentable.RecoverError.toIntent(this)
+            recoverIntent = if (startupPolicyError) null else MjpegEvent.Intentable.RecoverError.toIntent(this)
         )
     }
 }

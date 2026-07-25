@@ -24,6 +24,7 @@ public abstract class StreamingModuleService : Service() {
     protected val processedIntents: MutableSet<String> = mutableSetOf()
     private var wakeLock: PowerManager.WakeLock? = null
 
+    @Suppress("RedundantVisibilityModifier")
     protected companion object {
         public const val INTENT_ID: String = "info.dvkr.screenstream.intent.ID"
 
@@ -141,7 +142,7 @@ public abstract class StreamingModuleService : Service() {
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
 
-    protected fun showErrorNotification(message: String, recoverIntent: Intent) {
+    protected fun showErrorNotification(message: String, recoverIntent: Intent?) {
         hideErrorNotification()
 
         if (notificationHelper.notificationPermissionGranted(this).not()) {

@@ -37,12 +37,15 @@ import info.dvkr.screenstream.common.analytics.StreamMode
 import info.dvkr.screenstream.common.analytics.StreamingAnalytics
 import info.dvkr.screenstream.common.analytics.StreamingSessionAnalyticsTracker
 import info.dvkr.screenstream.common.getLog
+import info.dvkr.screenstream.common.isLocalNetworkPermissionGranted
 import info.dvkr.screenstream.common.module.ProjectionCoordinator
+import info.dvkr.screenstream.common.module.isStreamingModuleStartBlocked
 import info.dvkr.screenstream.mjpeg.MjpegModuleService
 import info.dvkr.screenstream.mjpeg.R
 import info.dvkr.screenstream.mjpeg.settings.MjpegSettings
 import info.dvkr.screenstream.mjpeg.ui.MjpegError
 import info.dvkr.screenstream.mjpeg.ui.MjpegState
+import info.dvkr.screenstream.mjpeg.ui.isStartupPolicyError
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -59,6 +62,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.uuid.Uuid
 
 internal class MjpegStreamingService(
     private val service: MjpegModuleService,
@@ -98,6 +103,22 @@ internal class MjpegStreamingService(
     }
 
     @MainThread
+    internal fun prepareStartProjectionForeground(startAttemptId: String): Boolean {
+        val currentStartAttemptId = pendingStartAttemptId
+        if (currentStartAttemptId != startAttemptId) {
+            XLog.i(getLog("prepareStartProjectionForeground", "MP_UI stale id=$startAttemptId current=${currentStartAttemptId ?: "none"}"))
+            return false
+        }
+        val currentForegroundPreflightStartAttemptId = foregroundPreflightStartAttemptId
+        if (currentForegroundPreflightStartAttemptId != null) {
+            XLog.i(getLog("prepareStartProjectionForeground", "Foreground preflight already pending id=$currentForegroundPreflightStartAttemptId"))
+            return false
+        }
+        foregroundPreflightStartAttemptId = startAttemptId
+        return true
+    }
+
+    @MainThread
     internal fun tryStartProjectionForeground(): Throwable? {
         val foregroundStartError = projectionCoordinator.startForegroundForProjection(requiresAudioForegroundService = false)
         XLog.i(getLog("tryStartProjectionForeground", "SP_TRACE route=preflight_v1 stage=foreground_preflight audioMode=none result=${foregroundStartError?.javaClass?.simpleName ?: "ok"}"))
@@ -131,6 +152,8 @@ internal class MjpegStreamingService(
     private var slowClients: List<MjpegState.Client> = emptyList()
     private var traffic: List<MjpegState.TrafficPoint> = emptyList()
     private var isStreaming: Boolean = false
+    @Volatile private var pendingStartAttemptId: String? = null
+    @Volatile private var foregroundPreflightStartAttemptId: String? = null
     private var waitingForPermission: Boolean = false
     private var mediaProjectionIntent: Intent? = null
     private var mediaProjection: MediaProjection? = null
@@ -145,7 +168,7 @@ internal class MjpegStreamingService(
         data class InitState(val clearIntent: Boolean = true) : InternalEvent(Priority.RESTART_IGNORE)
         data class DiscoverAddress(val reason: String, val attempt: Int) : InternalEvent(Priority.RESTART_IGNORE)
         data class StartServer(val interfaces: List<MjpegNetInterface>) : InternalEvent(Priority.RESTART_IGNORE)
-        data class StartStream(val permissionEducationShown: Boolean) : InternalEvent(Priority.RESTART_IGNORE)
+        data class StartStream(val permissionEducationShown: Boolean, val clearStartupPolicyError: Boolean = false) : InternalEvent(Priority.RESTART_IGNORE)
         data object StartStopFromWebPage : InternalEvent(Priority.RESTART_IGNORE)
         data object ScreenOff : InternalEvent(Priority.RESTART_IGNORE)
         data class ConfigurationChange(val newConfig: Configuration) : InternalEvent(Priority.RESTART_IGNORE) {
@@ -256,7 +279,7 @@ internal class MjpegStreamingService(
 
         val destroyJob = Job()
         sendEvent(InternalEvent.Destroy(destroyJob))
-        withTimeoutOrNull(3000) { destroyJob.join() } ?: XLog.w(getLog("destroyService", "Timeout"))
+        withTimeoutOrNull(3000.milliseconds) { destroyJob.join() } ?: XLog.w(getLog("destroyService", "Timeout"))
 
         handler.removeCallbacksAndMessages(null)
 
@@ -345,6 +368,8 @@ internal class MjpegStreamingService(
                 clients = emptyList()
                 slowClients = emptyList()
                 isStreaming = false
+                pendingStartAttemptId = null
+                foregroundPreflightStartAttemptId = null
                 waitingForPermission = false
                 if (event.clearIntent) mediaProjectionIntent = null
                 mediaProjection = null
@@ -355,6 +380,16 @@ internal class MjpegStreamingService(
             }
 
             is InternalEvent.DiscoverAddress -> {
+                if (service.isLocalNetworkPermissionGranted().not()) {
+                    if (pendingServer.not()) httpServer.stop(false)
+                    netInterfaces = emptyList()
+                    clients = emptyList()
+                    slowClients = emptyList()
+                    pendingServer = false
+                    currentError = MjpegError.LocalNetworkPermissionRequired()
+                    return
+                }
+
                 if (pendingServer.not()) httpServer.stop(false)
 
                 val newInterfaces = networkHelper.getNetInterfaces(
@@ -389,6 +424,16 @@ internal class MjpegStreamingService(
             }
 
             is InternalEvent.StartServer -> {
+                if (service.isLocalNetworkPermissionGranted().not()) {
+                    if (pendingServer.not()) httpServer.stop(false)
+                    netInterfaces = emptyList()
+                    clients = emptyList()
+                    slowClients = emptyList()
+                    pendingServer = false
+                    currentError = MjpegError.LocalNetworkPermissionRequired()
+                    return
+                }
+
                 if (pendingServer.not()) httpServer.stop(false)
                 httpServer.start(event.interfaces.toList())
 
@@ -415,41 +460,118 @@ internal class MjpegStreamingService(
 
             is InternalEvent.StartStopFromWebPage -> when {
                 isStreaming -> sendEvent(MjpegEvent.Intentable.StopStream("StartStopFromWebPage"))
-                pendingServer.not() && currentError == null -> {
+                pendingServer.not() && (currentError == null || currentError?.isStartupPolicyError() == true) -> {
+                    if (currentError?.isStartupPolicyError() == true) currentError = null
+                    if (pendingStartAttemptId != null) {
+                        XLog.i(getLog("StartStopFromWebPage", "Permission already pending id=${pendingStartAttemptId ?: "none"}"))
+                        return
+                    }
                     sessionAnalyticsTracker.onStartAttempt(
                         entryPoint = EntryPoint.WEB,
                         usedCachedPermission = mediaProjectionIntent != null,
                         permissionEducationShown = false
                     )
-                    waitingForPermission = true
+                    pendingStartAttemptId = Uuid.random().toString()
+                    val startAttemptId = pendingStartAttemptId!!
+                    mediaProjectionIntent?.let {
+                        check(Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { "MjpegEvent.StartStopFromWebPage: UPSIDE_DOWN_CAKE" }
+                        waitingForPermission = false
+                        XLog.i(getLog("StartStopFromWebPage", "SP_TRACE route=service_cached_permission stage=dispatch_source source=web startAttemptId=$startAttemptId"))
+                        try {
+                            MjpegModuleService.dispatchProjectionIntent(service, startAttemptId, it)
+                        } catch (cause: Throwable) {
+                            if (!cause.isStreamingModuleStartBlocked()) throw cause
+                            pendingStartAttemptId = null
+                            waitingForPermission = false
+                            sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                            val error = MjpegError.ScreenCaptureStartBlocked(cause)
+                            XLog.w(getLog("StartStopFromWebPage", "Cached projection dispatch blocked. source=web startAttemptId=$startAttemptId"), error)
+                            currentError = error
+                            return
+                        }
+                    } ?: run {
+                        waitingForPermission = true
+                        XLog.i(getLog("Permission", "MP_UI request id=$startAttemptId source=web"))
+                    }
                 }
             }
 
             is InternalEvent.StartStream -> {
+                if (event.clearStartupPolicyError && currentError?.isStartupPolicyError() == true) currentError = null
+                if (pendingStartAttemptId != null) {
+                    XLog.i(getLog("StartStream", "Permission already pending id=${pendingStartAttemptId ?: "none"}"))
+                    return
+                }
+                if (pendingServer || currentError != null || isStreaming) {
+                    XLog.i(getLog("StartStream", "Not ready. pendingServer=$pendingServer isStreaming=$isStreaming error=${currentError != null}"))
+                    return
+                }
+                if (service.isLocalNetworkPermissionGranted().not()) {
+                    currentError = MjpegError.LocalNetworkPermissionRequired()
+                    return
+                }
                 sessionAnalyticsTracker.onStartAttempt(
                     entryPoint = EntryPoint.BUTTON,
                     usedCachedPermission = mediaProjectionIntent != null,
                     permissionEducationShown = event.permissionEducationShown
                 )
+                pendingStartAttemptId = Uuid.random().toString()
+                val startAttemptId = pendingStartAttemptId!!
                 mediaProjectionIntent?.let {
                     check(Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { "MjpegEvent.StartStream: UPSIDE_DOWN_CAKE" }
-                    MjpegModuleService.startProjection(service, it, "cached_permission")
+                    waitingForPermission = false
+                    XLog.i(getLog("StartStream", "SP_TRACE route=service_cached_permission stage=dispatch_source source=button startAttemptId=$startAttemptId"))
+                    try {
+                        MjpegModuleService.dispatchProjectionIntent(service, startAttemptId, it)
+                    } catch (cause: Throwable) {
+                        if (!cause.isStreamingModuleStartBlocked()) throw cause
+                        pendingStartAttemptId = null
+                        waitingForPermission = false
+                        sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                        val error = MjpegError.ScreenCaptureStartBlocked(cause)
+                        XLog.w(getLog("StartStream", "Cached projection dispatch blocked. source=button startAttemptId=$startAttemptId"), error)
+                        currentError = error
+                        return
+                    }
                 } ?: run {
                     waitingForPermission = true
+                    XLog.i(getLog("Permission", "MP_UI request id=$startAttemptId source=button"))
                 }
             }
 
             is MjpegEvent.CastPermissionsDenied -> {
+                val currentStartAttemptId = pendingStartAttemptId
+                if (currentStartAttemptId != event.startAttemptId) {
+                    XLog.i(getLog("CastPermissionsDenied", "MP_UI stale id=${event.startAttemptId} current=${currentStartAttemptId ?: "none"}"))
+                    return
+                }
+                pendingStartAttemptId = null
+                foregroundPreflightStartAttemptId = null
                 waitingForPermission = false
                 sessionAnalyticsTracker.onStartFailed(StartFailGroup.PERMISSION_DENIED)
             }
 
             is MjpegEvent.StartProjection -> {
+                val currentStartAttemptId = pendingStartAttemptId
+                if (currentStartAttemptId != event.startAttemptId) {
+                    XLog.i(getLog("MjpegEvent.StartProjection", "MP_UI stale id=${event.startAttemptId} current=${currentStartAttemptId ?: "none"}"))
+                    clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    if (foregroundPreflightStartAttemptId == event.startAttemptId) foregroundPreflightStartAttemptId = null
+                    return
+                }
                 waitingForPermission = false
-                XLog.i(getLog("MjpegEvent.StartProjection", "SP_TRACE route=preflight_v1 stage=async_start preflight=${event.foregroundStartProcessed} preflightError=${event.foregroundStartError?.javaClass?.simpleName ?: "none"} pendingServer=$pendingServer isStreaming=$isStreaming cachedIntent=${mediaProjectionIntent != null}"))
+                foregroundPreflightStartAttemptId = null
+                XLog.i(
+                    getLog(
+                        "MjpegEvent.StartProjection",
+                        "SP_TRACE route=preflight_v1 stage=async_start startAttemptId=${event.startAttemptId} pendingServer=$pendingServer isStreaming=$isStreaming cachedIntent=${mediaProjectionIntent != null}"
+                    )
+                )
 
                 if (pendingServer) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    pendingStartAttemptId = null
+                    foregroundPreflightStartAttemptId = null
                     sessionAnalyticsTracker.onStartFailed(StartFailGroup.UNKNOWN)
                     val cause = IllegalStateException("StartProjection while server pending")
                     XLog.w(getLog("MjpegEvent.StartProjection", "Server pending"), cause)
@@ -458,10 +580,14 @@ internal class MjpegStreamingService(
 
                 if (isStreaming) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    pendingStartAttemptId = null
+                    foregroundPreflightStartAttemptId = null
                     sessionAnalyticsTracker.onStartAborted()
                     XLog.w(getLog("MjpegEvent.StartProjection", "Already streaming"))
                     return
                 }
+
+                pendingStartAttemptId = null
 
                 val startProjection = {
                     projectionCoordinator.startProjection(event.intent) { _, mediaProjection, _, isStartupStillValid ->
@@ -524,7 +650,12 @@ internal class MjpegStreamingService(
                     is ProjectionCoordinator.StartResult.Started -> {
                         currentError = null
                         sessionAnalyticsTracker.onStarted(currentActiveConsumersCount())
-                        XLog.i(getLog("MjpegEvent.StartProjection", "SP_TRACE route=preflight_v1 stage=result status=started phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"))
+                        XLog.i(
+                            getLog(
+                                "MjpegEvent.StartProjection",
+                                "SP_TRACE route=preflight_v1 stage=result status=started startAttemptId=${event.startAttemptId} phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"
+                            )
+                        )
                         XLog.i(getLog("MjpegEvent.StartProjection", "Started. g=${result.generation}"))
                     }
 
@@ -539,14 +670,24 @@ internal class MjpegStreamingService(
                                 "Interrupted. intent=${result.cachedIntentAction}/${mediaProjectionIntent != null}"
                             ), result.cause
                         )
-                        XLog.i(getLog("MjpegEvent.StartProjection", "SP_TRACE route=preflight_v1 stage=result status=interrupted phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"))
+                        XLog.i(
+                            getLog(
+                                "MjpegEvent.StartProjection",
+                                "SP_TRACE route=preflight_v1 stage=result status=interrupted startAttemptId=${event.startAttemptId} phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"
+                            )
+                        )
                         currentError = null
                         sendEvent(MjpegEvent.Intentable.StopStream("StartProjectionInterrupted"))
                     }
 
                     ProjectionCoordinator.StartResult.Busy -> {
                         sessionAnalyticsTracker.onStartFailed(StartFailGroup.BUSY)
-                        XLog.i(getLog("MjpegEvent.StartProjection", "SP_TRACE route=preflight_v1 stage=result status=busy phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"))
+                        XLog.i(
+                            getLog(
+                                "MjpegEvent.StartProjection",
+                                "SP_TRACE route=preflight_v1 stage=result status=busy startAttemptId=${event.startAttemptId} phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"
+                            )
+                        )
                         XLog.w(getLog("MjpegEvent.StartProjection", "Busy during $startPhase. intent=${mediaProjectionIntent != null}"))
                     }
 
@@ -554,6 +695,14 @@ internal class MjpegStreamingService(
                         val cause = result.cause ?: error("Missing cause for failed start result")
                         if (result.cachedIntentAction == ProjectionCoordinator.CachedIntentAction.INVALIDATE) {
                             mediaProjectionIntent = null
+                        }
+                        if (result.failureReason == ProjectionCoordinator.FailureReason.PROJECTION_ACQUIRE_REJECTED) {
+                            sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                            val error = MjpegError.ProjectionAcquireRejected(cause)
+                            XLog.w(getLog("MjpegEvent.StartProjection", "Projection acquire rejected during $startPhase. intent=${result.cachedIntentAction}/${mediaProjectionIntent != null}"), error)
+                            currentError = error
+                            stopStream("ProjectionAcquireRejected")
+                            return
                         }
                         val failedAction =
                             if (result is ProjectionCoordinator.StartResult.Blocked) {
@@ -564,14 +713,21 @@ internal class MjpegStreamingService(
                                 "Fatal"
                             }
                         val logMessage = "$failedAction during $startPhase. intent=${result.cachedIntentAction}/${mediaProjectionIntent != null}"
-                        XLog.i(getLog("MjpegEvent.StartProjection", "SP_TRACE route=preflight_v1 stage=result status=${if (result is ProjectionCoordinator.StartResult.Blocked) "blocked" else "fatal"} phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"))
+                        XLog.i(
+                            getLog(
+                                "MjpegEvent.StartProjection",
+                                "SP_TRACE route=preflight_v1 stage=result status=${if (result is ProjectionCoordinator.StartResult.Blocked) "blocked" else "fatal"} startAttemptId=${event.startAttemptId} phase=$startPhase cachedIntent=${mediaProjectionIntent != null}"
+                            )
+                        )
                         if (result is ProjectionCoordinator.StartResult.Blocked) {
-                            XLog.w(getLog("MjpegEvent.StartProjection", logMessage), cause)
+                            val error = MjpegError.ScreenCaptureStartBlocked(cause)
+                            XLog.w(getLog("MjpegEvent.StartProjection", logMessage), error)
+                            currentError = error
                         } else {
                             XLog.e(getLog("MjpegEvent.StartProjection", logMessage), cause)
                             stopStream("StartProjectionFatal")
+                            currentError = cause as? MjpegError ?: MjpegError.UnknownError(cause)
                         }
-                        currentError = cause as? MjpegError ?: MjpegError.UnknownError(cause)
                     }
                 }
             }
@@ -661,6 +817,8 @@ internal class MjpegStreamingService(
             is InternalEvent.RestartServer -> {
                 // Never stop streaming on configuration change - persistent mode
 
+                pendingStartAttemptId = null
+                foregroundPreflightStartAttemptId = null
                 waitingForPermission = false
                 if (pendingServer) {
                     XLog.d(getLog("processEvent", "RestartServer: No running server."))
@@ -730,6 +888,8 @@ internal class MjpegStreamingService(
     private inline fun stopStream(stopReason: String? = null): Boolean {
         val wasStreaming = isStreaming
         val activeConsumersAtStop = currentActiveConsumersCount()
+        pendingStartAttemptId = null
+        foregroundPreflightStartAttemptId = null
         waitingForPermission = false
         if (wasStreaming) {
             XLog.i(
@@ -775,17 +935,18 @@ internal class MjpegStreamingService(
     // Inline Only
     @Suppress("NOTHING_TO_INLINE")
     private inline fun getStateString() =
-        "Pending Dest/Server: $destroyPending/$pendingServer, Streaming:$isStreaming, WFP:$waitingForPermission, Clients:${clients.size}, Error:${currentError}"
+        "d=$destroyPending srv=$pendingServer str=$isStreaming start=${pendingStartAttemptId ?: "-"} clients=${clients.size} err=$currentError"
 
     // Inline Only
     @Suppress("NOTHING_TO_INLINE")
     private inline fun publishState() {
         val state = MjpegState(
-            isBusy = pendingServer || destroyPending || waitingForPermission || currentError != null,
+            isBusy = pendingServer || destroyPending || pendingStartAttemptId != null || currentError != null,
             serverNetInterfaces = netInterfaces.map {
                 MjpegState.ServerNetInterface(it.label, it.buildUrl(mjpegSettings.data.value.serverPort))
             }.sortedBy { it.fullAddress },
             waitingCastPermission = waitingForPermission,
+            startAttemptId = pendingStartAttemptId,
             isStreaming = isStreaming,
             pin = MjpegState.Pin(mjpegSettings.data.value.enablePin, mjpegSettings.data.value.pin, mjpegSettings.data.value.hidePinOnStart),
             clients = clients.toList(),

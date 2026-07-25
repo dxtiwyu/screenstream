@@ -1,5 +1,6 @@
 package info.dvkr.screenstream.webrtc
 
+import android.app.ActivityManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import androidx.compose.ui.Modifier
 import com.elvishew.xlog.XLog
 import info.dvkr.screenstream.common.getLog
 import info.dvkr.screenstream.common.module.StreamingModule
+import info.dvkr.screenstream.common.module.isStreamingModuleStartBlocked
 import info.dvkr.screenstream.webrtc.internal.WebRtcEvent
 import info.dvkr.screenstream.webrtc.internal.WebRtcStreamingService
 import info.dvkr.screenstream.webrtc.ui.WebRtcMainScreenUI
@@ -22,7 +24,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.koin.core.parameter.parametersOf
-import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 public class WebRtcStreamingModule : StreamingModule {
@@ -62,10 +63,10 @@ public class WebRtcStreamingModule : StreamingModule {
         WebRtcMainScreenUI(
             webRtcStateFlow = _webRtcStateFlow.asStateFlow(),
             sendEvent = ::sendEvent,
+            onProjectionGranted = ::startProjection,
             modifier = modifier
         )
 
-    @OptIn(ExperimentalUuidApi::class)
     @MainThread
     override fun startModule(context: Context) {
         XLog.d(getLog("startModule"))
@@ -75,12 +76,17 @@ public class WebRtcStreamingModule : StreamingModule {
             StreamingModule.State.Initiated -> {
                 startToken = Uuid.random().toString()
                 _streamingServiceState.value = StreamingModule.State.PendingStart
+                val intent = WebRtcEvent.Intentable.StartService(startToken!!).toIntent(context)
                 try {
-                    WebRtcModuleService.startService(context, WebRtcEvent.Intentable.StartService(startToken!!).toIntent(context))
-                } catch (t: Throwable) {
+                    WebRtcModuleService.startService(context, intent)
+                } catch (error: Throwable) {
                     startToken = null
                     _streamingServiceState.value = StreamingModule.State.Initiated
-                    throw t
+                    if (error.isStreamingModuleStartBlocked()) {
+                        val importance = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }.importance
+                        throw StreamingModule.StartBlockedException(id, importance, error)
+                    }
+                    throw error
                 }
             }
 
@@ -174,16 +180,18 @@ public class WebRtcStreamingModule : StreamingModule {
     }
 
     @MainThread
-    internal fun startProjection(intent: Intent) {
-        XLog.d(getLog("startProjection", "intent=$intent"))
+    internal fun startProjection(startAttemptId: String, intent: Intent) {
+        XLog.d(getLog("startProjection", "startAttemptId=$startAttemptId, intent=$intent"))
         check(Looper.getMainLooper().isCurrentThread) { "Only main thread allowed" }
 
         when (val state = _streamingServiceState.value) {
             is StreamingModule.State.Running -> {
                 val activeStreamingService = streamingService
                 if (activeStreamingService != null) {
-                    val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
-                    activeStreamingService.sendEvent(WebRtcEvent.StartProjection(intent = intent, foregroundStartProcessed = true, foregroundStartError))
+                    if (activeStreamingService.prepareStartProjectionForeground(startAttemptId)) {
+                        val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
+                        activeStreamingService.sendEvent(WebRtcEvent.StartProjection(startAttemptId, intent, foregroundStartProcessed = true, foregroundStartError))
+                    }
                 } else XLog.w(getLog("startProjection", "Running state without WebRtcStreamingService"))
             }
 

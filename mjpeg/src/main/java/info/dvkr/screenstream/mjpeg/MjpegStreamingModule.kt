@@ -1,5 +1,6 @@
 package info.dvkr.screenstream.mjpeg
 
+import android.app.ActivityManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import androidx.compose.ui.Modifier
 import com.elvishew.xlog.XLog
 import info.dvkr.screenstream.common.getLog
 import info.dvkr.screenstream.common.module.StreamingModule
+import info.dvkr.screenstream.common.module.isStreamingModuleStartBlocked
 import info.dvkr.screenstream.mjpeg.internal.MjpegEvent
 import info.dvkr.screenstream.mjpeg.internal.MjpegStreamingService
 import info.dvkr.screenstream.mjpeg.ui.MjpegMainScreenUI
@@ -22,7 +24,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.koin.core.parameter.parametersOf
-import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 public class MjpegStreamingModule : StreamingModule {
@@ -52,6 +53,8 @@ public class MjpegStreamingModule : StreamingModule {
             }
         }.distinctUntilChanged()
 
+    override val requiresLocalNetworkPermission: Boolean = true
+
     override val nameResource: Int = R.string.mjpeg_stream_mode
     override val descriptionResource: Int = R.string.mjpeg_stream_mode_description
     override val detailsResource: Int = R.string.mjpeg_stream_mode_details
@@ -64,11 +67,11 @@ public class MjpegStreamingModule : StreamingModule {
         MjpegMainScreenUI(
             mjpegStateFlow = _mjpegStateFlow.asStateFlow(),
             sendEvent = ::sendEvent,
+            onProjectionGranted = ::startProjection,
             windowWidthSizeClass = windowWidthSizeClass,
             modifier = modifier
         )
 
-    @OptIn(ExperimentalUuidApi::class)
     @MainThread
     override fun startModule(context: Context) {
         XLog.d(getLog("startModule"))
@@ -78,12 +81,17 @@ public class MjpegStreamingModule : StreamingModule {
             StreamingModule.State.Initiated -> {
                 startToken = Uuid.random().toString()
                 _streamingServiceState.value = StreamingModule.State.PendingStart
+                val intent = MjpegEvent.Intentable.StartService(startToken!!).toIntent(context)
                 try {
-                    MjpegModuleService.startService(context, MjpegEvent.Intentable.StartService(startToken!!).toIntent(context))
-                } catch (t: Throwable) {
+                    MjpegModuleService.startService(context, intent)
+                } catch (error: Throwable) {
                     startToken = null
                     _streamingServiceState.value = StreamingModule.State.Initiated
-                    throw t
+                    if (error.isStreamingModuleStartBlocked()) {
+                        val importance = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }.importance
+                        throw StreamingModule.StartBlockedException(id, importance, error)
+                    }
+                    throw error
                 }
             }
 
@@ -179,17 +187,24 @@ public class MjpegStreamingModule : StreamingModule {
         sendEvent(MjpegEvent.Intentable.StopStream(reason))
     }
 
+    override fun recoverError() {
+        XLog.d(getLog("recoverError"))
+        sendEvent(MjpegEvent.Intentable.RecoverError)
+    }
+
     @MainThread
-    internal fun startProjection(intent: Intent) {
-        XLog.d(getLog("startProjection", "intent=$intent"))
+    internal fun startProjection(startAttemptId: String, intent: Intent) {
+        XLog.d(getLog("startProjection", "startAttemptId=$startAttemptId, intent=$intent"))
         check(Looper.getMainLooper().isCurrentThread) { "Only main thread allowed" }
 
         when (val state = _streamingServiceState.value) {
             is StreamingModule.State.Running -> {
                 val activeStreamingService = streamingService
                 if (activeStreamingService != null) {
-                    val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
-                    activeStreamingService.sendEvent(MjpegEvent.StartProjection(intent = intent, foregroundStartProcessed = true, foregroundStartError))
+                    if (activeStreamingService.prepareStartProjectionForeground(startAttemptId)) {
+                        val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
+                        activeStreamingService.sendEvent(MjpegEvent.StartProjection(startAttemptId, intent, foregroundStartProcessed = true, foregroundStartError))
+                    }
                 } else XLog.w(getLog("startProjection", "Running state without MjpegStreamingService"))
             }
 
@@ -214,6 +229,7 @@ public class MjpegStreamingModule : StreamingModule {
             else -> when (event) {
                 is MjpegEvent.CastPermissionsDenied,
                 is MjpegEvent.StartProjection,
+                is MjpegEvent.Intentable.RecoverError,
                 is MjpegEvent.Intentable.StopStream,
                 is MjpegStreamingService.InternalEvent.StartStream ->
                     XLog.i(getLog("sendEvent", "Ignoring stale event $event in state $state"))

@@ -59,9 +59,10 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLHandshakeException
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 internal class RtspClient(
-    private val appVersion: String,
+    appVersion: String,
     private val generation: Long,
     private val rtspUrl: RtspUrl,
     private val protocolPolicy: RtspSettings.Values.ProtocolPolicy,
@@ -109,7 +110,7 @@ internal class RtspClient(
                 .onFailure { XLog.w(getLog("trySendNewVideoParams", "NewVideoParams discarded")) }
 
         suspend fun receiveItemWithTimeoutOrNull(timeMillis: Long = 100): QueuedItem? {
-            val item = withTimeoutOrNull(timeMillis) { itemsChannel.receive() } ?: return null
+            val item = withTimeoutOrNull(timeMillis.milliseconds) { itemsChannel.receive() } ?: return null
             if (item is QueuedItem.Frame) {
                 bufferedFrameCount.decrementAndGet()
                 when (item.frame) {
@@ -293,7 +294,7 @@ internal class RtspClient(
                     acceptVideoFrames = true
                 }
 
-                val videoParams = withTimeoutOrNull(5_000) { this@RtspClient.videoParams.get().await() }
+                val videoParams = withTimeoutOrNull(5_000.milliseconds) { this@RtspClient.videoParams.get().await() }
                 if (videoParams?.isOk != true) error("SPS/PPS/VPS not set or incomplete for video codec.")
 
                 val tcp = TcpStreamSocket(Dispatchers.Default, selectorManager, rtspUrl.host, rtspUrl.port, rtspUrl.tlsEnabled)
@@ -566,7 +567,7 @@ internal class RtspClient(
 
     private suspend fun keepAliveLoop(tcpSocket: TcpStreamSocket) {
         while (currentCoroutineContext().isActive) {
-            delay(commandsManager.getSuggestedKeepAliveDelayMs())
+            delay(commandsManager.getSuggestedKeepAliveDelayMs().milliseconds)
             try {
                 val hasSession = commandsManager.hasSession()
                 val method = if (hasSession) RtspBaseMessageHandler.Method.GET_PARAMETER else RtspBaseMessageHandler.Method.OPTIONS

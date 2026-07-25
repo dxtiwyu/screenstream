@@ -1,5 +1,6 @@
 package info.dvkr.screenstream.rtsp
 
+import android.app.ActivityManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import androidx.compose.ui.Modifier
 import com.elvishew.xlog.XLog
 import info.dvkr.screenstream.common.getLog
 import info.dvkr.screenstream.common.module.StreamingModule
+import info.dvkr.screenstream.common.module.isStreamingModuleStartBlocked
 import info.dvkr.screenstream.rtsp.internal.RtspEvent
 import info.dvkr.screenstream.rtsp.internal.RtspStreamingService
 import info.dvkr.screenstream.rtsp.settings.RtspSettings
@@ -24,7 +26,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.koin.core.parameter.parametersOf
-import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 public class RtspStreamingModule : StreamingModule {
@@ -57,6 +58,8 @@ public class RtspStreamingModule : StreamingModule {
             }
             .distinctUntilChanged()
 
+    override val requiresLocalNetworkPermission: Boolean = true
+
     override val nameResource: Int = R.string.rtsp_stream_mode
     override val descriptionResource: Int = R.string.rtsp_stream_mode_description
     override val detailsResource: Int = R.string.rtsp_stream_mode_details
@@ -69,11 +72,11 @@ public class RtspStreamingModule : StreamingModule {
         RtspMainScreenUI(
             rtspStateFlow = _rtspStateFlow.asStateFlow(),
             sendEvent = ::sendEvent,
+            onProjectionGranted = ::startProjection,
             windowWidthSizeClass = windowWidthSizeClass,
             modifier = modifier
         )
 
-    @OptIn(ExperimentalUuidApi::class)
     @MainThread
     override fun startModule(context: Context) {
         XLog.d(getLog("startModule"))
@@ -83,12 +86,17 @@ public class RtspStreamingModule : StreamingModule {
             StreamingModule.State.Initiated -> {
                 startToken = Uuid.random().toString()
                 _streamingServiceState.value = StreamingModule.State.PendingStart
+                val intent = RtspEvent.Intentable.StartService(startToken!!).toIntent(context)
                 try {
-                    RtspModuleService.startService(context, RtspEvent.Intentable.StartService(startToken!!).toIntent(context))
-                } catch (t: Throwable) {
+                    RtspModuleService.startService(context, intent)
+                } catch (error: Throwable) {
                     startToken = null
                     _streamingServiceState.value = StreamingModule.State.Initiated
-                    throw t
+                    if (error.isStreamingModuleStartBlocked()) {
+                        val importance = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }.importance
+                        throw StreamingModule.StartBlockedException(id, importance, error)
+                    }
+                    throw error
                 }
             }
 
@@ -185,17 +193,24 @@ public class RtspStreamingModule : StreamingModule {
         sendEvent(RtspEvent.Intentable.StopStream(reason))
     }
 
+    override fun recoverError() {
+        XLog.d(getLog("recoverError"))
+        sendEvent(RtspEvent.Intentable.RecoverError)
+    }
+
     @MainThread
-    internal fun startProjection(intent: Intent) {
-        XLog.d(getLog("startProjection", "intent=$intent"))
+    internal fun startProjection(startAttemptId: String, intent: Intent) {
+        XLog.d(getLog("startProjection", "startAttemptId=$startAttemptId, intent=$intent"))
         check(Looper.getMainLooper().isCurrentThread) { "Only main thread allowed" }
 
         when (val state = _streamingServiceState.value) {
             is StreamingModule.State.Running -> {
                 val activeStreamingService = streamingService
                 if (activeStreamingService != null) {
-                    val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
-                    activeStreamingService.sendEvent(RtspEvent.StartProjection(intent = intent, foregroundStartProcessed = true, foregroundStartError))
+                    if (activeStreamingService.prepareStartProjectionForeground(startAttemptId)) {
+                        val foregroundStartError = activeStreamingService.tryStartProjectionForeground()
+                        activeStreamingService.sendEvent(RtspEvent.StartProjection(startAttemptId, intent, foregroundStartProcessed = true, foregroundStartError))
+                    }
                 } else XLog.w(getLog("startProjection", "Running state without RtspStreamingService"))
             }
 
@@ -219,7 +234,8 @@ public class RtspStreamingModule : StreamingModule {
             }
             else -> when (event) {
                 is RtspEvent.StartProjection,
-                RtspEvent.CastPermissionsDenied,
+                is RtspEvent.CastPermissionsDenied,
+                is RtspEvent.Intentable.RecoverError,
                 is RtspEvent.Intentable.StopStream,
                 is RtspStreamingService.InternalEvent.StartStream ->
                     XLog.i(getLog("sendEvent", "Ignoring stale event in state=$state: $event"))

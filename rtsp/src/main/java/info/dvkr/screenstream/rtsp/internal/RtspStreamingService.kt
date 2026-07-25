@@ -36,12 +36,15 @@ import info.dvkr.screenstream.common.analytics.StreamingAnalytics
 import info.dvkr.screenstream.common.analytics.StreamingSessionAnalyticsTracker
 import info.dvkr.screenstream.common.getLog
 import info.dvkr.screenstream.common.getVersionName
+import info.dvkr.screenstream.common.isLocalNetworkPermissionGranted
 import info.dvkr.screenstream.common.module.ProjectionCoordinator
+import info.dvkr.screenstream.common.module.isStreamingModuleStartBlocked
 import info.dvkr.screenstream.rtsp.R
 import info.dvkr.screenstream.rtsp.RtspModuleService
 import info.dvkr.screenstream.rtsp.internal.EncoderUtils.adjustResizeFactor
 import info.dvkr.screenstream.rtsp.internal.audio.AudioEncoder
 import info.dvkr.screenstream.rtsp.internal.audio.AudioSource
+import info.dvkr.screenstream.rtsp.internal.onvif.OnvifServer
 import info.dvkr.screenstream.rtsp.internal.rtsp.RtspUrl
 import info.dvkr.screenstream.rtsp.internal.rtsp.client.RtspClient
 import info.dvkr.screenstream.rtsp.internal.rtsp.server.ClientStats
@@ -54,6 +57,7 @@ import info.dvkr.screenstream.rtsp.ui.RtspBinding
 import info.dvkr.screenstream.rtsp.ui.RtspClientStatus
 import info.dvkr.screenstream.rtsp.ui.RtspError
 import info.dvkr.screenstream.rtsp.ui.RtspState
+import info.dvkr.screenstream.rtsp.ui.isStartupPolicyError
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +79,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URISyntaxException
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.uuid.Uuid
 
 internal class RtspStreamingService(
     private val service: RtspModuleService,
@@ -119,19 +125,32 @@ internal class RtspStreamingService(
     }
 
     @MainThread
+    internal fun prepareStartProjectionForeground(startAttemptId: String): Boolean {
+        val currentStartAttemptId = projectionState.pendingStartAttemptId
+        if (currentStartAttemptId != startAttemptId) {
+            XLog.i(getLog("prepareStartProjectionForeground", "MP_UI stale id=$startAttemptId current=${currentStartAttemptId ?: "none"}"))
+            return false
+        }
+        val currentForegroundPreflightStartAttemptId = projectionState.foregroundPreflightStartAttemptId
+        if (currentForegroundPreflightStartAttemptId != null) {
+            XLog.i(getLog("prepareStartProjectionForeground", "Foreground preflight already pending id=$currentForegroundPreflightStartAttemptId"))
+            return false
+        }
+        projectionState.foregroundPreflightStartAttemptId = startAttemptId
+        return true
+    }
+
+    @MainThread
     internal fun tryStartProjectionForeground(): Throwable? {
         val settings = rtspSettings.data.value
         val audioPermissionGranted =
             ContextCompat.checkSelfPermission(service, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val wantsAudio = settings.enableMic || settings.enableDeviceAudio
         if (!audioPermissionGranted && wantsAudio) {
-            coroutineScope.launch {
-                rtspSettings.updateData { copy(enableMic = false, enableDeviceAudio = false) }
-            }
+            return RtspError.AudioPermissionRequired()
         }
         val wantsMicrophoneForSession = audioPermissionGranted && settings.enableMic
         val wantsDeviceAudioForSession = audioPermissionGranted && settings.enableDeviceAudio
-        // Playback capture also records audio and shares the same audio FGS path on Android 14+.
         val wantsAudioForegroundService = wantsMicrophoneForSession || wantsDeviceAudioForSession
         val foregroundStartError = projectionCoordinator.startForegroundForProjection(wantsAudioForegroundService)
         val audioMode = when {
@@ -200,6 +219,8 @@ internal class RtspStreamingService(
     }
 
     private class ProjectionState(
+        @Volatile var pendingStartAttemptId: String? = null,
+        @Volatile var foregroundPreflightStartAttemptId: String? = null,
         var waitingForPermission: Boolean = false,
         var cachedIntent: Intent? = null,
         var active: ActiveProjection? = null,
@@ -283,7 +304,7 @@ internal class RtspStreamingService(
         }
     }
 
-    private inner class RtspServerController() {
+    private inner class RtspServerController {
         var isActive: Boolean = false
 
         var bindings: List<RtspBinding> = emptyList()
@@ -295,30 +316,28 @@ internal class RtspStreamingService(
         private var generation: Long = 0L
         private var statsHeartbeatJob: Job? = null
         private var discoveredBindings: List<DiscoveredBinding> = emptyList()
+        private var onvifServer: OnvifServer? = null
 
         private var server: RtspServer? = null
-            set(value) {
-                if (value == null) {
-                    statsHeartbeatJob?.cancel()
-                    statsHeartbeatJob = null
-                    generation++
-                    field?.stop()
-                    isActive = false
-                    discoveredBindings = emptyList()
-                    bindings = emptyList()
-                }
-                field = value
-            }
 
-        fun onEvent(event: InternalEvent.RtspServer) {
-            if (event !is InternalEvent.RtspServer.DiscoverAddress && event.generation != generation) {
+        suspend fun onEvent(event: InternalEvent.RtspServer) {
+            if (event !is InternalEvent.RtspServer.DiscoverAddress &&
+                event !is InternalEvent.RtspServer.OnvifDiscoveryChanged &&
+                event.generation != generation
+            ) {
                 XLog.d(getLog("RtspServer:${event::class.simpleName}", "Stale generation=${event.generation}. Ignoring."))
                 return
             }
 
             when (event) {
                 is InternalEvent.RtspServer.DiscoverAddress -> {
-                    server = null
+                    if (service.isLocalNetworkPermissionGranted().not()) {
+                        clearServer()
+                        currentError = RtspError.LocalNetworkPermissionRequired()
+                        return
+                    }
+
+                    clearServer()
 
                     runCatching {
                         val netInterfaces = networkHelper.getNetInterfaces(
@@ -406,6 +425,16 @@ internal class RtspStreamingService(
                 is InternalEvent.RtspServer.OnStart -> {
                     isActive = true
                     currentError = null
+                    onvifServer = OnvifServer(
+                        context = service,
+                        deviceId = rtspSettings.data.value.onvifDeviceId,
+                        appVersion = appVersion,
+                        protocolPolicy = rtspSettings.data.value.serverProtocol,
+                        endpoints = event.endpoints
+                    ).also { server ->
+                        updateOnvifVideoMetadata(server, projectionState.lastVideoParams)
+                        server.setEnabled(rtspSettings.data.value.onvifDiscoveryEnabled)
+                    }
                 }
 
                 is InternalEvent.RtspServer.OnBindFailures -> {
@@ -420,8 +449,11 @@ internal class RtspStreamingService(
                     isActive = false
                 }
 
-                is InternalEvent.RtspServer.OnStop -> server = null
+                is InternalEvent.RtspServer.OnStop -> clearServer()
                 is InternalEvent.RtspServer.OnClientStats -> Unit // Intentional to trigger serverClientStats update
+                is InternalEvent.RtspServer.OnvifDiscoveryChanged -> {
+                    onvifServer?.setEnabled(rtspSettings.data.value.onvifDiscoveryEnabled)
+                }
             }
         }
 
@@ -430,27 +462,36 @@ internal class RtspStreamingService(
             statsHeartbeatJob = coroutineScope.launch {
                 while (isActive) {
                     sendEvent(InternalEvent.RtspServer.OnClientStats(generation))
-                    delay(1000)
+                    delay(1000.milliseconds)
                 }
             }
         }
 
-        fun stop(stopServer: Boolean) {
+        suspend fun stop(stopServer: Boolean) {
             if (server == null) return
 
             statsHeartbeatJob?.cancel()
             statsHeartbeatJob = null
 
             if (stopServer) {
-                server = null
+                clearServer()
             } else {
                 server?.disconnectAllClients()
                 server?.clearMediaParams()
+                onvifServer?.let { updateOnvifVideoMetadata(it, null) }
             }
         }
 
-        fun setVideoParams(video: VideoParams) {
+        fun setVideoParams(video: VideoParams, width: Int = 0, height: Int = 0) {
             server?.setVideoData(video.codec, video.sps, video.pps, video.vps)
+            val currentOnvifServer = onvifServer
+            if (currentOnvifServer != null) {
+                coroutineScope.launch {
+                    if (onvifServer === currentOnvifServer && projectionState.lastVideoParams === video) {
+                        updateOnvifVideoMetadata(currentOnvifServer, video, width, height)
+                    }
+                }
+            }
         }
 
         fun setAudioParams(audio: AudioParams?) {
@@ -461,9 +502,32 @@ internal class RtspStreamingService(
             is MediaFrame.VideoFrame -> server?.onVideoFrame(frame) ?: frame.release()
             is MediaFrame.AudioFrame -> server?.onAudioFrame(frame) ?: frame.release()
         }
+
+        private suspend fun updateOnvifVideoMetadata(onvifServer: OnvifServer, videoParams: VideoParams?, width: Int = 0, height: Int = 0) {
+            val videoEncoder = projectionState.active?.videoEncoder
+            onvifServer.setVideoMetadata(
+                videoParams = videoParams,
+                width = width.takeIf { it > 0 } ?: videoEncoder?.width ?: 0,
+                height = height.takeIf { it > 0 } ?: videoEncoder?.height ?: 0,
+                fps = rtspSettings.data.value.videoFps
+            )
+        }
+
+        private suspend fun clearServer() {
+            statsHeartbeatJob?.cancel()
+            statsHeartbeatJob = null
+            onvifServer?.close()
+            onvifServer = null
+            generation++
+            server?.stop()
+            server = null
+            isActive = false
+            discoveredBindings = emptyList()
+            bindings = emptyList()
+        }
     }
 
-    private inner class RtspClientController() {
+    private inner class RtspClientController {
         var status: RtspClientStatus = RtspClientStatus.IDLE
 
         private var client: RtspClient? = null
@@ -474,6 +538,12 @@ internal class RtspStreamingService(
         var reconnectLoopStartedAt: Long = 0L
 
         fun startClient(rtspUrl: RtspUrl, onlyVideo: Boolean) {
+            if (service.isLocalNetworkPermissionGranted().not()) {
+                stop()
+                currentError = RtspError.LocalNetworkPermissionRequired()
+                status = RtspClientStatus.ERROR
+                return
+            }
             currentError = null
             client = RtspClient(appVersion, ++generation, rtspUrl, rtspSettings.data.value.clientProtocol, onlyVideo) {
                 XLog.d(getLog("RtspClient.sendEvent", it.toString()))
@@ -482,6 +552,12 @@ internal class RtspStreamingService(
         }
 
         fun connect() {
+            if (service.isLocalNetworkPermissionGranted().not()) {
+                stop()
+                currentError = RtspError.LocalNetworkPermissionRequired()
+                status = RtspClientStatus.ERROR
+                return
+            }
             currentError = null
             status = RtspClientStatus.STARTING
             client?.connect()
@@ -499,7 +575,7 @@ internal class RtspStreamingService(
             client?.beginVideoReconfigure()
         }
 
-        fun onEvent(event: InternalEvent.RtspClient) {
+        suspend fun onEvent(event: InternalEvent.RtspClient) {
             if (event.generation != generation) {
                 XLog.d(getLog("RtspClient:${event::class.simpleName}", "Stale generation=${event.generation}. Ignoring."))
                 return
@@ -565,11 +641,11 @@ internal class RtspStreamingService(
     }
 
     internal sealed class InternalEvent(priority: Int) : RtspEvent(priority) {
-        data class InitState(val clearIntent: Boolean, val mode: RtspSettings.Values.Mode) : InternalEvent(Priority.DESTROY_IGNORE)
+        data class InitState(val clearIntent: Boolean, val mode: RtspSettings.Values.Mode, val pendingStartAttemptId: String? = null) : InternalEvent(Priority.DESTROY_IGNORE)
         data class OnVideoCodecChange(val name: String?) : InternalEvent(Priority.DESTROY_IGNORE)
         data class OnAudioCodecChange(val name: String?) : InternalEvent(Priority.DESTROY_IGNORE)
         data class ModeChanged(val mode: RtspSettings.Values.Mode) : InternalEvent(Priority.RECOVER_IGNORE)
-        data class StartStream(val permissionEducationShown: Boolean) : InternalEvent(Priority.RECOVER_IGNORE)
+        data class StartStream(val permissionEducationShown: Boolean, val clearStartupPolicyError: Boolean = false) : InternalEvent(Priority.RECOVER_IGNORE)
         data object RetryBindings : InternalEvent(Priority.RECOVER_IGNORE)
         data class ClientAutoReconnect(val reason: String, val attempt: Int) : InternalEvent(Priority.RECOVER_IGNORE)
         data class AudioCaptureError(val cause: Throwable) : InternalEvent(Priority.RECOVER_IGNORE)
@@ -604,9 +680,12 @@ internal class RtspStreamingService(
                 RtspServer(Priority.RECOVER_IGNORE)
 
             data class OnError(override val generation: Long, val error: RtspError) : RtspServer(Priority.RECOVER_IGNORE)
-            data class OnStart(override val generation: Long) : RtspServer(Priority.RECOVER_IGNORE)
+            data class OnStart(override val generation: Long, val endpoints: List<RtspServerEndpoint>) : RtspServer(Priority.RECOVER_IGNORE)
             data class OnStop(override val generation: Long) : RtspServer(Priority.DESTROY_IGNORE)
             data class OnClientStats(override val generation: Long) : RtspServer(Priority.DESTROY_IGNORE)
+            data object OnvifDiscoveryChanged : RtspServer(Priority.RECOVER_IGNORE) {
+                override val generation: Long = -1L
+            }
         }
 
         data class OnVideoFps(val fps: Int) : InternalEvent(Priority.DESTROY_IGNORE)
@@ -706,8 +785,12 @@ internal class RtspStreamingService(
             sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "SettingsChanged"), timeout = 200)
         }
 
+        rtspSettings.data.map { it.onvifDiscoveryEnabled }.listenForChange(coroutineScope, 1) {
+            sendEvent(InternalEvent.RtspServer.OnvifDiscoveryChanged)
+        }
+
         coroutineScope.launch {
-            delay(250)
+            delay(250.milliseconds)
             if (settingsLoaded) return@launch
 
             settingsLoaded = true
@@ -737,7 +820,7 @@ internal class RtspStreamingService(
 
         val destroyJob = Job()
         sendEvent(InternalEvent.Destroy(destroyJob))
-        withTimeoutOrNull(3000) { destroyJob.join() } ?: XLog.w(getLog("destroyService", "Timeout"))
+        withTimeoutOrNull(3000.milliseconds) { destroyJob.join() } ?: XLog.w(getLog("destroyService", "Timeout"))
 
         handler.removeCallbacksAndMessages(null)
 
@@ -803,13 +886,14 @@ internal class RtspStreamingService(
             RtspSettings.Values.Mode.SERVER -> serverActive.not()
             RtspSettings.Values.Mode.CLIENT -> {
                 val audioEnabled = rtspSettings.data.value.enableMic || rtspSettings.data.value.enableDeviceAudio
+                val clientReady = clientController != null
                 val videoReady = selectedVideoEncoderInfo != null
                 val audioReady = audioEnabled.not() || selectedAudioEncoderInfo != null
-                (videoReady && audioReady).not()
+                (clientReady && videoReady && audioReady).not()
             }
         }
         val errorBlocks = currentError != null && currentError !is RtspError.ClientError
-        val isBusy = destroyPending || !settingsLoaded || initializedMode == null || projectionState.waitingForPermission || errorBlocks || readinessBusy
+        val isBusy = destroyPending || !settingsLoaded || initializedMode == null || projectionState.pendingStartAttemptId != null || errorBlocks || readinessBusy
 
         return RtspState(
             mode = selectedMode,
@@ -817,6 +901,7 @@ internal class RtspStreamingService(
             serverBindings = if (isServerMode) serverController?.bindings.orEmpty() else emptyList(),
             isBusy = isBusy,
             waitingCastPermission = projectionState.waitingForPermission,
+            startAttemptId = projectionState.pendingStartAttemptId,
             isStreaming = projectionState.active != null,
             selectedVideoEncoder = selectedVideoEncoderInfo,
             selectedAudioEncoder = selectedAudioEncoderInfo,
@@ -834,6 +919,8 @@ internal class RtspStreamingService(
 
             sessionAnalyticsTracker.onStartFailedIfPending(StartFailGroup.UNKNOWN)
             projectionState.cachedIntent = null
+            projectionState.pendingStartAttemptId = null
+            projectionState.foregroundPreflightStartAttemptId = null
             projectionState.waitingForPermission = false
             stopStream(stopServer = true, stopReason = "HandleMessageException")
 
@@ -852,7 +939,9 @@ internal class RtspStreamingService(
             if (previousError != currentError) {
                 previousError = currentError
                 val notifyError = currentError?.takeUnless {
-                    it is RtspError.ClientError || it is RtspError.NotificationPermissionRequired
+                    it is RtspError.ClientError ||
+                            it is RtspError.NotificationPermissionRequired ||
+                            it is RtspError.LocalNetworkPermissionRequired
                 }
                 notifyError?.let { service.showErrorNotification(it) } ?: service.hideErrorNotification()
             }
@@ -862,7 +951,7 @@ internal class RtspStreamingService(
     }
 
     // On RTSP-HT only
-    private fun processEvent(event: RtspEvent) {
+    private suspend fun processEvent(event: RtspEvent) {
         when (event) {
             is InternalEvent.InitState -> {
                 serverController = null
@@ -874,6 +963,7 @@ internal class RtspStreamingService(
                 }
                 initializedMode = event.mode
                 projectionState = ProjectionState(
+                    pendingStartAttemptId = event.pendingStartAttemptId,
                     waitingForPermission = false,
                     cachedIntent = if (event.clearIntent) null else projectionState.cachedIntent
                 )
@@ -939,8 +1029,52 @@ internal class RtspStreamingService(
                     XLog.i(getLog("StartStream", "Settings are not initialized yet. Ignoring."))
                     return
                 }
+                if (event.clearStartupPolicyError && currentError?.isStartupPolicyError() == true) currentError = null
+                if (projectionState.pendingStartAttemptId != null) {
+                    XLog.i(getLog("StartStream", "Permission already pending id=${projectionState.pendingStartAttemptId ?: "none"}"))
+                    return
+                }
                 if (projectionState.active != null) {
                     XLog.d(getLog("StartStream", "Already streaming. Ignoring."))
+                    return
+                }
+                val mode = initializedMode ?: rtspSettings.data.value.mode
+                val settings = rtspSettings.data.value
+                val audioEnabled = settings.enableMic || settings.enableDeviceAudio
+                val audioPermissionGranted =
+                    ContextCompat.checkSelfPermission(service, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (audioEnabled && !audioPermissionGranted) {
+                    sessionAnalyticsTracker.onStartAttempt(
+                        entryPoint = EntryPoint.BUTTON,
+                        usedCachedPermission = projectionState.cachedIntent != null,
+                        permissionEducationShown = event.permissionEducationShown
+                    )
+                    sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                    val error = RtspError.AudioPermissionRequired()
+                    currentError = error
+                    XLog.w(getLog("StartStream", "Audio permission required before startup. mode=$mode"), error)
+                    return
+                }
+                val blockedByError = currentError != null && currentError !is RtspError.ClientError
+                val notReady =
+                    blockedByError ||
+                            when (mode) {
+                                RtspSettings.Values.Mode.SERVER -> serverController?.isActive != true
+                                RtspSettings.Values.Mode.CLIENT ->
+                                    clientController == null || selectedVideoEncoderInfo == null || (audioEnabled && selectedAudioEncoderInfo == null)
+                            }
+                if (notReady) {
+                    XLog.i(
+                        getLog(
+                            "StartStream",
+                            "Not ready. mode=$mode blockedByError=$blockedByError serverReady=${serverController?.isActive == true} clientReady=${clientController != null} videoReady=${selectedVideoEncoderInfo != null} audioReady=${!audioEnabled || selectedAudioEncoderInfo != null}"
+                        )
+                    )
+                    return
+                }
+                if (service.isLocalNetworkPermissionGranted().not()) {
+                    currentError = RtspError.LocalNetworkPermissionRequired()
+                    if (mode == RtspSettings.Values.Mode.CLIENT) clientController?.status = RtspClientStatus.ERROR
                     return
                 }
                 sessionAnalyticsTracker.onStartAttempt(
@@ -949,11 +1083,28 @@ internal class RtspStreamingService(
                     permissionEducationShown = event.permissionEducationShown
                 )
 
+                projectionState.pendingStartAttemptId = Uuid.random().toString()
+                val startAttemptId = projectionState.pendingStartAttemptId!!
+
                 projectionState.cachedIntent?.let {
                     check(Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { "RtspEvent.StartStream: UPSIDE_DOWN_CAKE" }
-                    RtspModuleService.startProjection(service, it, "cached_permission")
+                    projectionState.waitingForPermission = false
+                    XLog.i(getLog("StartStream", "SP_TRACE route=service_cached_permission stage=dispatch_source source=button startAttemptId=$startAttemptId"))
+                    try {
+                        RtspModuleService.dispatchProjectionIntent(service, startAttemptId, it)
+                    } catch (cause: Throwable) {
+                        if (!cause.isStreamingModuleStartBlocked()) throw cause
+                        projectionState.pendingStartAttemptId = null
+                        projectionState.waitingForPermission = false
+                        sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                        val error = RtspError.ScreenCaptureStartBlocked(cause)
+                        XLog.w(getLog("StartStream", "Cached projection dispatch blocked. startAttemptId=$startAttemptId mode=$mode"), error)
+                        currentError = error
+                        return
+                    }
                 } ?: run {
                     projectionState.waitingForPermission = true
+                    XLog.i(getLog("Permission", "MP_UI request id=$startAttemptId source=button"))
                 }
             }
 
@@ -1010,15 +1161,31 @@ internal class RtspStreamingService(
             }
 
             is RtspEvent.CastPermissionsDenied -> {
+                val currentStartAttemptId = projectionState.pendingStartAttemptId
+                if (currentStartAttemptId != event.startAttemptId) {
+                    XLog.i(getLog("CastPermissionsDenied", "MP_UI stale id=${event.startAttemptId} current=${currentStartAttemptId ?: "none"}"))
+                    return
+                }
+                projectionState.pendingStartAttemptId = null
                 projectionState.waitingForPermission = false
                 sessionAnalyticsTracker.onStartFailed(StartFailGroup.PERMISSION_DENIED)
             }
 
             is RtspEvent.StartProjection -> {
+                val currentStartAttemptId = projectionState.pendingStartAttemptId
+                if (currentStartAttemptId != event.startAttemptId) {
+                    XLog.i(getLog("StartProjection", "MP_UI stale id=${event.startAttemptId} current=${currentStartAttemptId ?: "none"}"))
+                    clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    if (projectionState.foregroundPreflightStartAttemptId == event.startAttemptId) projectionState.foregroundPreflightStartAttemptId = null
+                    return
+                }
+                projectionState.foregroundPreflightStartAttemptId = null
                 projectionState.waitingForPermission = false
 
                 if (!settingsLoaded || initializedMode == null) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
                     sessionAnalyticsTracker.onStartAborted()
                     XLog.i(getLog("StartProjection", "Settings are not initialized yet. Ignoring."))
                     return
@@ -1026,24 +1193,51 @@ internal class RtspStreamingService(
 
                 if (projectionState.active != null) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
                     sessionAnalyticsTracker.onStartAborted()
                     XLog.d(getLog("StartProjection", "Already streaming. Ignoring."))
                     return
                 }
+
+                val settings = rtspSettings.data.value
+                val modeLocal = settings.mode
+                val audioEnabled = settings.enableMic || settings.enableDeviceAudio
+                val audioPermissionGranted =
+                    ContextCompat.checkSelfPermission(service, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (audioEnabled && !audioPermissionGranted) {
+                    clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
+                    sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                    val error = RtspError.AudioPermissionRequired()
+                    currentError = error
+                    XLog.w(getLog("StartProjection", "Audio permission required before projection startup. mode=$modeLocal"), error)
+                    return
+                }
+                if (event.foregroundStartError is RtspError.AudioPermissionRequired) {
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
+                    sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                    currentError = event.foregroundStartError
+                    XLog.w(getLog("StartProjection", "Audio permission required during foreground preflight. mode=$modeLocal"), event.foregroundStartError)
+                    return
+                }
+
                 if (selectedVideoEncoderInfo == null) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
                     throw IllegalStateException("No video encoder selected")
                 }
 
-                val settings = rtspSettings.data.value
-                val audioEnabled = settings.enableMic || settings.enableDeviceAudio
-
                 if (audioEnabled && selectedAudioEncoderInfo == null) {
                     clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                    projectionState.pendingStartAttemptId = null
+                    projectionState.foregroundPreflightStartAttemptId = null
                     throw IllegalStateException("No audio encoder selected")
                 }
 
-                val modeLocal = settings.mode
                 val serverController = if (modeLocal == RtspSettings.Values.Mode.SERVER) serverController else null
                 val clientController = if (modeLocal == RtspSettings.Values.Mode.CLIENT) clientController else null
                 var clientRtspUrl: RtspUrl? = null
@@ -1051,19 +1245,21 @@ internal class RtspStreamingService(
                 if (modeLocal == RtspSettings.Values.Mode.SERVER) {
                     if (serverController == null) {
                         XLog.w(getLog("StartProjection", "Server controller is null for mode=$modeLocal. Reinitializing."))
-                        sendEvent(InternalEvent.InitState(clearIntent = false, mode = modeLocal))
+                        sendEvent(InternalEvent.InitState(clearIntent = false, mode = modeLocal, pendingStartAttemptId = event.startAttemptId))
                         sendEvent(InternalEvent.RtspServer.DiscoverAddress(reason = "StartProjectionControllerRecovery"), timeout = 25)
                         sendEvent(event, timeout = 50)
                         return
                     }
                     if (!serverController.isActive) {
                         clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                        projectionState.pendingStartAttemptId = null
+                        projectionState.foregroundPreflightStartAttemptId = null
                         throw IllegalStateException("RtspServer is not ready")
                     }
                 } else {
                     if (clientController == null) {
                         XLog.w(getLog("StartProjection", "Client controller is null for mode=$modeLocal. Reinitializing."))
-                        sendEvent(InternalEvent.InitState(clearIntent = false, mode = modeLocal))
+                        sendEvent(InternalEvent.InitState(clearIntent = false, mode = modeLocal, pendingStartAttemptId = event.startAttemptId))
                         sendEvent(event, timeout = 50)
                         return
                     }
@@ -1072,6 +1268,8 @@ internal class RtspStreamingService(
                         RtspUrl.parse(settings.serverAddress)
                     } catch (e: URISyntaxException) {
                         clearPreparedProjectionStartIfNeeded(event.foregroundStartProcessed, event.foregroundStartError)
+                        projectionState.pendingStartAttemptId = null
+                        projectionState.foregroundPreflightStartAttemptId = null
                         XLog.w(getLog("StartProjection", "Bad RTSP URL: ${settings.serverAddress}"), e)
                         sessionAnalyticsTracker.onStartFailed(StartFailGroup.UNKNOWN)
                         stopStream(stopServer = true, stopReason = "StartProjectionInvalidRtspUrl")
@@ -1081,11 +1279,11 @@ internal class RtspStreamingService(
                     }
                 }
 
-                val setVideoParams: (VideoParams) -> Unit =
+                val setVideoParams: (VideoParams, Int, Int) -> Unit =
                     if (modeLocal == RtspSettings.Values.Mode.SERVER) {
-                        { video -> serverController?.setVideoParams(video) }
+                        { video, width, height -> serverController?.setVideoParams(video, width, height) }
                     } else {
-                        { video -> clientController?.setVideoParams(video) }
+                        { video, _, _ -> clientController?.setVideoParams(video) }
                     }
 
                 val setAudioParams: (AudioParams?) -> Unit =
@@ -1102,14 +1300,6 @@ internal class RtspStreamingService(
                         { frame -> clientController?.onFrame(frame) ?: frame.release() }
                     }
 
-                val audioPermissionGranted =
-                    ContextCompat.checkSelfPermission(service, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                val wantsAudio = settings.enableMic || settings.enableDeviceAudio
-                if (!audioPermissionGranted && wantsAudio) {
-                    coroutineScope.launch {
-                        rtspSettings.updateData { copy(enableMic = false, enableDeviceAudio = false) }
-                    }
-                }
                 val wantsMicrophoneForSession = audioPermissionGranted && settings.enableMic
                 val wantsDeviceAudioForSession = audioPermissionGranted && settings.enableDeviceAudio
                 // Playback capture also records audio and shares the same audio FGS path on Android 14+.
@@ -1120,7 +1310,9 @@ internal class RtspStreamingService(
                     wantsDeviceAudioForSession -> "device"
                     else -> "none"
                 }
-                XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=async_start mode=$modeLocal audioMode=$audioMode preflight=${event.foregroundStartProcessed} preflightError=${event.foregroundStartError?.javaClass?.simpleName ?: "none"} settingsLoaded=$settingsLoaded cachedIntent=${projectionState.cachedIntent != null}"))
+                projectionState.pendingStartAttemptId = null
+                projectionState.foregroundPreflightStartAttemptId = null
+                XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=async_start startAttemptId=${event.startAttemptId} mode=$modeLocal audioMode=$audioMode settingsLoaded=$settingsLoaded cachedIntent=${projectionState.cachedIntent != null}"))
                 val startProjection = {
                     projectionCoordinator.startProjection(event.intent) { _, mediaProjection, audioCaptureAllowed, isStartupStillValid ->
                         // TODO Starting from Android R, if your application requests the SYSTEM_ALERT_WINDOW permission, and the user has
@@ -1148,7 +1340,7 @@ internal class RtspStreamingService(
                             onVideoInfo = { sps, pps, vps ->
                                 val params = VideoParams(videoEncoderInfo.codec, sps, pps, vps)
                                 projectionState.lastVideoParams = params
-                                setVideoParams(params)
+                                setVideoParams(params, encodedWidth, encodedHeight)
                             },
                             onVideoFrame = onFrame,
                             onFps = { sendEvent(InternalEvent.OnVideoFps(it)) },
@@ -1335,7 +1527,7 @@ internal class RtspStreamingService(
                         }
                         currentError = null
                         sessionAnalyticsTracker.onStarted(currentActiveConsumersCount())
-                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=started mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
+                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=started startAttemptId=${event.startAttemptId} mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
                         XLog.i(getLog("StartProjection", "Started. mode=$modeLocal, intent=${projectionState.cachedIntent != null}, audioFgs=${startResult.audioCaptureAllowed}"))
                     }
 
@@ -1343,9 +1535,8 @@ internal class RtspStreamingService(
                         if (startResult.cachedIntentAction == ProjectionCoordinator.CachedIntentAction.INVALIDATE) {
                             projectionState.cachedIntent = null
                         }
-                        projectionState.waitingForPermission = false
                         sessionAnalyticsTracker.onStartAborted()
-                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=interrupted mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
+                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=interrupted startAttemptId=${event.startAttemptId} mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
                         XLog.i(getLog("StartProjection", "Interrupted. mode=$modeLocal, intent=${startResult.cachedIntentAction}/${projectionState.cachedIntent != null}"), startResult.cause)
                         stopStream(stopServer = false, stopReason = "StartProjectionInterrupted")
                         currentError = null
@@ -1353,36 +1544,53 @@ internal class RtspStreamingService(
 
                     ProjectionCoordinator.StartResult.Busy -> {
                         sessionAnalyticsTracker.onStartFailed(StartFailGroup.BUSY)
-                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=busy mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
+                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=busy startAttemptId=${event.startAttemptId} mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
                         XLog.w(getLog("StartProjection", "Busy during $startPhase. mode=$modeLocal, intent=${projectionState.cachedIntent != null}"))
                     }
 
                     is ProjectionCoordinator.StartResult.Blocked, is ProjectionCoordinator.StartResult.Fatal -> {
                         val cause = startResult.cause ?: error("Missing cause for failed start result")
-                        sessionAnalyticsTracker.onStartFailed(
-                            if (startResult is ProjectionCoordinator.StartResult.Blocked) StartFailGroup.BLOCKED else StartFailGroup.FATAL
-                        )
                         if (startResult.cachedIntentAction == ProjectionCoordinator.CachedIntentAction.INVALIDATE) {
                             projectionState.cachedIntent = null
                         }
-                        projectionState.waitingForPermission = false
+                        if (startResult.failureReason == ProjectionCoordinator.FailureReason.PROJECTION_ACQUIRE_REJECTED) {
+                            sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                            val error = RtspError.ProjectionAcquireRejected(cause)
+                            XLog.w(getLog("StartProjection", "Projection acquire rejected during $startPhase. mode=$modeLocal, intent=${startResult.cachedIntentAction}/${projectionState.cachedIntent != null}"), error)
+                            currentError = error
+                            stopStream(stopServer = false, stopReason = "ProjectionAcquireRejected")
+                            return
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && wantsAudioForegroundService && cause is SecurityException) {
+                            sessionAnalyticsTracker.onStartFailed(StartFailGroup.BLOCKED)
+                            val error = RtspError.AudioStartBlocked(cause)
+                            XLog.w(getLog("StartProjection", "Audio foreground start blocked during $startPhase. mode=$modeLocal"), error)
+                            currentError = error
+                            stopStream(stopServer = false, stopReason = "AudioStartBlocked")
+                            return
+                        }
+                        sessionAnalyticsTracker.onStartFailed(
+                            if (startResult is ProjectionCoordinator.StartResult.Blocked) StartFailGroup.BLOCKED else StartFailGroup.FATAL
+                        )
                         val logMessage = if (startResult is ProjectionCoordinator.StartResult.Blocked) {
                             "Blocked during $startPhase. mode=$modeLocal, intent=${startResult.cachedIntentAction}/${projectionState.cachedIntent != null}"
                         } else {
                             "Fatal during $startPhase. mode=$modeLocal, intent=${startResult.cachedIntentAction}/${projectionState.cachedIntent != null}"
                         }
-                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=${if (startResult is ProjectionCoordinator.StartResult.Blocked) "blocked" else "fatal"} mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
+                        XLog.i(getLog("StartProjection", "SP_TRACE route=preflight_v1 stage=result status=${if (startResult is ProjectionCoordinator.StartResult.Blocked) "blocked" else "fatal"} startAttemptId=${event.startAttemptId} mode=$modeLocal audioMode=$audioMode phase=$startPhase cachedIntent=${projectionState.cachedIntent != null}"))
                         if (startResult is ProjectionCoordinator.StartResult.Blocked) {
-                            XLog.w(getLog("StartProjection", logMessage), cause)
+                            val error = RtspError.ScreenCaptureStartBlocked(cause)
+                            XLog.w(getLog("StartProjection", logMessage), error)
+                            currentError = error
                         } else {
                             XLog.e(getLog("StartProjection", logMessage), cause)
-                        }
-                        stopStream(stopServer = true, stopReason = "StartProjectionFailed")
-                        currentError = cause as? RtspError ?: RtspError.UnknownError(cause)
-                        if (rtspSettings.data.value.mode == RtspSettings.Values.Mode.SERVER) {
-                            serverController?.isActive = false
-                        } else {
-                            clientController?.status = RtspClientStatus.ERROR
+                            stopStream(stopServer = true, stopReason = "StartProjectionFailed")
+                            currentError = cause as? RtspError ?: RtspError.UnknownError(cause)
+                            if (rtspSettings.data.value.mode == RtspSettings.Values.Mode.SERVER) {
+                                serverController?.isActive = false
+                            } else {
+                                clientController?.status = RtspClientStatus.ERROR
+                            }
                         }
                     }
                 }
@@ -1538,9 +1746,7 @@ internal class RtspStreamingService(
         }
     }
 
-    // Inline Only
-    @Suppress("NOTHING_TO_INLINE")
-    private inline fun stopStream(stopServer: Boolean, stopReason: String? = null) {
+    private suspend fun stopStream(stopServer: Boolean, stopReason: String? = null) {
         val wasStreaming = projectionState.active != null
         val activeConsumersAtStop = currentActiveConsumersCount()
         if (wasStreaming) {
@@ -1561,6 +1767,8 @@ internal class RtspStreamingService(
 
         resizeActor?.close()
         resizeActor = null
+        projectionState.pendingStartAttemptId = null
+        projectionState.foregroundPreflightStartAttemptId = null
         projectionState.waitingForPermission = false
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

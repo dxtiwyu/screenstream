@@ -33,7 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowSizeClass
-import info.dvkr.screenstream.AdaptiveBanner
+import info.dvkr.screenstream.AnchoredAdaptiveBanner
 import info.dvkr.screenstream.R
 import info.dvkr.screenstream.common.module.StreamingModule
 import info.dvkr.screenstream.common.module.StreamingModuleManager
@@ -59,8 +59,8 @@ internal fun StreamTabContent( //TODO Add foldable support
     }
 
     Column(modifier = modifier) {
-        val with = with(LocalDensity.current) { boundsInWindow.width.toDp() }
-        if (with >= 800.dp) {
+        val width = with(LocalDensity.current) { boundsInWindow.width.toDp() }
+        if (width >= 800.dp) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1F), verticalArrangement = Arrangement.Center) {
                     StreamingModuleSelector(
@@ -71,18 +71,18 @@ internal fun StreamTabContent( //TODO Add foldable support
                     )
                 }
                 Column(modifier = Modifier.weight(1F)) {
-                    AdaptiveBanner(modifier = Modifier.fillMaxWidth())
+                    AnchoredAdaptiveBanner(modifier = Modifier.fillMaxWidth())
                 }
             }
         } else {
             Column(modifier = Modifier.fillMaxWidth()) {
+                AnchoredAdaptiveBanner(modifier = Modifier.fillMaxWidth())
                 StreamingModuleSelector(
                     streamingModulesManager = streamingModulesManager,
                     modifier = Modifier
                         .padding(top = 8.dp, start = 16.dp, end = 16.dp, bottom = 8.dp)
                         .fillMaxWidth()
                 )
-                AdaptiveBanner(modifier = Modifier.fillMaxWidth())
             }
         }
         activeModule.value?.StreamUIContent(

@@ -1,5 +1,9 @@
 package info.dvkr.screenstream.rtsp.ui
 
+import android.Manifest
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,8 +21,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -27,14 +33,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.dropUnlessStarted
+import info.dvkr.screenstream.common.findActivity
+import info.dvkr.screenstream.common.getAppSettingsIntent
+import info.dvkr.screenstream.common.isPermissionGranted
 import info.dvkr.screenstream.common.module.StreamingModule
 import info.dvkr.screenstream.common.notification.NotificationHelper
 import info.dvkr.screenstream.common.ui.DoubleClickProtection
-import info.dvkr.screenstream.common.ui.ScreenCapturePermissionWithEducation
 import info.dvkr.screenstream.common.ui.get
-import info.dvkr.screenstream.common.ui.rememberScreenCapturePermissionWithEducationState
+import info.dvkr.screenstream.common.ui.mediaprojection.ScreenCapturePermissionFlow
+import info.dvkr.screenstream.common.ui.mediaprojection.rememberScreenCaptureStartRequester
+import info.dvkr.screenstream.common.shouldShowPermissionRationale
 import info.dvkr.screenstream.rtsp.R
-import info.dvkr.screenstream.rtsp.RtspModuleService
 import info.dvkr.screenstream.rtsp.internal.RtspEvent
 import info.dvkr.screenstream.rtsp.internal.RtspStreamingService
 import info.dvkr.screenstream.rtsp.internal.rtsp.RtspUrl
@@ -53,6 +62,7 @@ import org.koin.compose.koinInject
 internal fun RtspMainScreenUI(
     rtspStateFlow: StateFlow<RtspState>,
     sendEvent: (event: RtspEvent) -> Unit,
+    onProjectionGranted: (startAttemptId: String, intent: Intent) -> Unit,
     windowWidthSizeClass: StreamingModule.WindowWidthSizeClass,
     modifier: Modifier = Modifier,
     rtspSettings: RtspSettings = koinInject(),
@@ -61,23 +71,48 @@ internal fun RtspMainScreenUI(
     val rtspState = rtspStateFlow.collectAsStateWithLifecycle()
     val rtspSettingsState = rtspSettings.data.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val screenCapturePermissionWithEducationState = rememberScreenCapturePermissionWithEducationState()
+    val screenCaptureStartRequester = rememberScreenCaptureStartRequester()
     val context = LocalContext.current
     val state = rtspState.value
     val settings = rtspSettingsState.value
     val selectedMode = settings.mode
+    val activity = remember(context) { context.findActivity() }
+    val recordAudioDeniedOnce = rememberSaveable { mutableStateOf(false) }
+    val appSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (context.isPermissionGranted(Manifest.permission.RECORD_AUDIO)) screenCaptureStartRequester.request()
+    }
+    val recordAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            recordAudioDeniedOnce.value = false
+            screenCaptureStartRequester.request()
+        } else if (activity.shouldShowPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+            recordAudioDeniedOnce.value = true
+        } else if (recordAudioDeniedOnce.value) {
+            appSettingsLauncher.launch(context.getAppSettingsIntent())
+        } else {
+            recordAudioDeniedOnce.value = true
+        }
+    }
     val updateSettings: (RtspSettings.Data.() -> RtspSettings.Data) -> Unit = { transform ->
         scope.launch { rtspSettings.updateData(transform) }
     }
 
     BoxWithConstraints(modifier = modifier) {
-        ScreenCapturePermissionWithEducation(
-            state = screenCapturePermissionWithEducationState,
-            shouldRequestPermission = state.waitingCastPermission,
-            isStreaming = state.isStreaming,
-            onStartRequested = { educationShown -> sendEvent(RtspStreamingService.InternalEvent.StartStream(permissionEducationShown = educationShown)) },
-            onPermissionGranted = { intent -> if (state.waitingCastPermission) RtspModuleService.startProjection(context, intent) },
-            onPermissionDenied = { if (state.waitingCastPermission) sendEvent(RtspEvent.CastPermissionsDenied) },
+        ScreenCapturePermissionFlow(
+            startRequester = screenCaptureStartRequester,
+            permissionScopeKey = "rtsp",
+            startAttemptId = state.startAttemptId?.takeIf { state.waitingCastPermission },
+            onStartRequested = onStartRequested@{ educationShown ->
+                if (state.isStreaming) return@onStartRequested
+                sendEvent(
+                    RtspStreamingService.InternalEvent.StartStream(
+                        permissionEducationShown = educationShown,
+                        clearStartupPolicyError = state.error?.isStartupPolicyError() == true
+                    )
+                )
+            },
+            onPermissionGranted = { startAttemptId, intent -> if (state.startAttemptId == startAttemptId) onProjectionGranted(startAttemptId, intent) },
+            onPermissionDenied = { startAttemptId -> if (state.startAttemptId == startAttemptId) sendEvent(RtspEvent.CastPermissionsDenied(startAttemptId)) },
         )
 
         val lazyVerticalStaggeredGridState = rememberLazyStaggeredGridState()
@@ -87,13 +122,24 @@ internal fun RtspMainScreenUI(
             state = lazyVerticalStaggeredGridState,
             contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 64.dp),
         ) {
-            if (state.error is RtspError.UnknownError || state.error is RtspError.NotificationPermissionRequired) {
+            state.error?.takeIf { error ->
+                error is RtspError.UnknownError ||
+                        error is RtspError.NotificationPermissionRequired ||
+                        error is RtspError.LocalNetworkPermissionRequired ||
+                        error.isStartupPolicyError()
+            }?.let { error ->
                 item(key = "ERROR") {
                     ErrorCard(
-                        error = state.error,
+                        error = error,
                         sendEvent = sendEvent,
+                        audioEnabled = settings.enableMic || settings.enableDeviceAudio,
+                        retryStartupPolicyError = { screenCaptureStartRequester.request() },
+                        allowMicrophone = { recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO) },
                         openNotificationSettings = {
                             context.startActivity(notificationHelper.getStreamNotificationSettingsIntent())
+                        },
+                        openLocalNetworkSettings = {
+                            context.startActivity(context.getAppSettingsIntent())
                         },
                         modifier = Modifier.padding(8.dp)
                     )
@@ -145,7 +191,7 @@ internal fun RtspMainScreenUI(
             }
             item(key = "AUDIO") {
                 AudioCard(
-                    isStreaming = state.isStreaming,
+                    isStreaming = state.isStreaming || state.waitingCastPermission || state.startAttemptId != null,
                     selectedAudioEncoder = state.selectedAudioEncoder,
                     settings = settings,
                     updateSettings = updateSettings,
@@ -169,7 +215,7 @@ internal fun RtspMainScreenUI(
                     if (state.isStreaming) {
                         sendEvent(RtspEvent.Intentable.StopStream("User action: Button"))
                     } else {
-                        screenCapturePermissionWithEducationState.requestStart()
+                        screenCaptureStartRequester.request()
                     }
                 }
             },
