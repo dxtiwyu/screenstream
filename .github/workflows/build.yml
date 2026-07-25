@@ -50,9 +50,10 @@ jobs:
 
       # ── FDroid Debug (uses checked-in debug-key.jks, no secrets needed) ──
       - name: Build FDroid Debug APK
+        timeout-minutes: 25
         env:
           GRADLE_OPTS: "-Dorg.gradle.console=plain"
-        run: ./gradlew :app:assembleFDroidDebug --no-daemon --build-cache --stacktrace
+        run: ./gradlew :app:assembleFDroidDebug --stacktrace
 
       # ── Release signing (optional – only runs when secrets are set) ──
       - name: Decode release keystore
