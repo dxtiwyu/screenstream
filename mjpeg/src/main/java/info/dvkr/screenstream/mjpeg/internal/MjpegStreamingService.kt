@@ -761,7 +761,9 @@ internal class MjpegStreamingService(
                 if (!isStreaming && !destroyPending && !pendingServer && !waitingForPermission) {
                     if (mediaProjectionIntent != null) {
                         XLog.i(getLog("AutoRestartStream", "Restarting stream with cached intent"))
-                        MjpegModuleService.startProjection(service, mediaProjectionIntent!!, "auto_restart")
+                        val startAttemptId = Uuid.random().toString()
+                        pendingStartAttemptId = startAttemptId
+                        MjpegModuleService.dispatchProjectionIntent(service, startAttemptId, mediaProjectionIntent!!)
                     } else {
                         // No cached intent (e.g. Android 14+): show permission dialog again
                         XLog.i(getLog("AutoRestartStream", "No cached intent – requesting permission again"))
