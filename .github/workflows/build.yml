@@ -19,12 +19,29 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
+
+      # Gradle build cache + dependency cache — dramatically cuts repeat build times
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      # Cache NDK — avoids re-downloading ~1 GB every run
+      - name: Cache NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_SDK_ROOT }}/ndk/28.2.13676358
+          key: ndk-28.2.13676358
 
       - name: Install NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
           echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;28.2.13676358"
 
@@ -33,15 +50,14 @@ jobs:
 
       # ── FDroid Debug (uses checked-in debug-key.jks, no secrets needed) ──
       - name: Build FDroid Debug APK
-        run: ./gradlew :app:assembleFDroidDebug --no-daemon
+        run: ./gradlew :app:assembleFDroidDebug --no-daemon --build-cache
 
       # ── Release signing (optional – only runs when secrets are set) ──
       - name: Decode release keystore
         if: ${{ env.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > release-key.jks
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > release-key.jks
 
       - name: Build FDroid Release APK
         if: ${{ env.KEYSTORE_BASE64 != '' }}
@@ -51,15 +67,11 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          ./gradlew :app:assembleFDroidRelease --no-daemon \
+          ./gradlew :app:assembleFDroidRelease --no-daemon --build-cache \
             -Pandroid.injected.signing.store.file="$(pwd)/release-key.jks" \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-
-      # ── Collect all APKs ──
-      - name: Find built APKs
-        run: find app/build/outputs/apk -name "*.apk" | sort
 
       - name: Upload FDroid Debug APK
         uses: actions/upload-artifact@v4
@@ -67,6 +79,7 @@ jobs:
           name: ScreenStream-FDroid-Debug
           path: app/build/outputs/apk/FDroid/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
 
       - name: Upload FDroid Release APK
         if: ${{ env.KEYSTORE_BASE64 != '' }}
@@ -77,3 +90,4 @@ jobs:
           name: ScreenStream-FDroid-Release-Signed
           path: app/build/outputs/apk/FDroid/release/*.apk
           if-no-files-found: warn
+          retention-days: 7
