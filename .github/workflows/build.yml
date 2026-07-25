@@ -50,7 +50,9 @@ jobs:
 
       # ── FDroid Debug (uses checked-in debug-key.jks, no secrets needed) ──
       - name: Build FDroid Debug APK
-        run: ./gradlew :app:assembleFDroidDebug --no-daemon --build-cache
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.console=plain"
+        run: ./gradlew :app:assembleFDroidDebug --no-daemon --build-cache --stacktrace
 
       # ── Release signing (optional – only runs when secrets are set) ──
       - name: Decode release keystore
@@ -67,7 +69,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          ./gradlew :app:assembleFDroidRelease --no-daemon --build-cache \
+          ./gradlew :app:assembleFDroidRelease --no-daemon --build-cache --console=plain \
             -Pandroid.injected.signing.store.file="$(pwd)/release-key.jks" \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
